@@ -1,5 +1,14 @@
 # 2021-autumn-network_programming
 
+
+## Projects
+|Project|Topic|
+|---|---|
+|Project 1||
+|Project 2||
+|Project 3||
+|Project 4||
+
 ## HW1
 In this project, you are asked to **design a shell** named npshell. The npshell should support the
 following features:
