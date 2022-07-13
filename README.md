@@ -4,10 +4,10 @@
 ## Projects
 |Project|Topic|
 |---|---|
-|Project 1||
-|Project 2||
-|Project 3||
-|Project 4||
+|Project 1|NPShell|
+|Project 2|RWG System|
+|Project 3|HTTP Server & CGI|
+|Project 4|SOCKS 4|
 
 ## HW1
 In this project, you are asked to **design a shell** named npshell. The npshell should support the
