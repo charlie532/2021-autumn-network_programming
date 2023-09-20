@@ -1,202 +1,55 @@
-#include <cstdio>
 #include <iostream>
-#include <sys/select.h>
-#include <unistd.h>
-#include <stdio.h>
-#include <stdlib.h>
+#include <sstream>
 #include <string.h>
-#include <sys/socket.h>
 #include <sys/wait.h>
-#include <netinet/in.h>
 #include <fcntl.h>
 #include <arpa/inet.h>
+#include <map>
+#include <vector>
 
 using namespace std;
 
 #define MAX_LINE_LEN 15000
-#define MAX_COMMAND_NUM 5000
-#define MAX_COMMAND_LEN 1000
-#define MAX_FILENAME_LEN 1000
-#define MAX_ARGV_LEN 256
-#define MAX_PIPEFD_NUM 1024
-#define MAX_MSG_LEN 1024
-#define MAX_NAME_LEN 20
 #define MAX_USER 30
-#define ENV_NUM 100
-#define ENV_LEN 500
 
-const int NONE = 1;
-const int ORDINARY_PIPE = 2;
-const int NUMBER_PIPE = 3;
-const int NUMBER_PIPE_ERR = 4;
-const int FILE_REDIRECTION = 5;
-const int USER_PIPE_OUT = 6;
-const int USER_PIPE_NULL = 7;
+#define NONE 1
+#define ORDINARY_PIPE 2
+#define NUMBER_PIPE 3
+#define NUMBER_PIPE_ERR 4
+#define FILE_REDIRECTION 5
+#define USER_PIPE_OUT 6
+#define USER_PIPE_NULL 7
 
-struct EnvTable {
-    char key[ENV_NUM][ENV_LEN];
-    char value[ENV_NUM][ENV_LEN];
-    int length;
-};
 struct User {
-    char name[MAX_NAME_LEN];
-    char ip_port[40];
+    string name;
+    string ip_port;
     int sockfd;
     bool is_login;
-    EnvTable env;
+    map<string, string> env;
 };
-struct CmdTable {
-    char *commands[MAX_COMMAND_NUM];
-    int command_length;
-};
-struct ParsedCmd {
+
+struct ParsedCommand {
     int op;
     bool in_pipe;
     int from_user;
     int to_user;
     int count;
-    int argc;
-    char *argv[MAX_ARGV_LEN];
-    char filename[MAX_FILENAME_LEN];
+    vector<string> argv;
+    string filename;
 };
+
 struct Pipefd {
-    int IOfd[2];
+    int pipefd[2];
     int count;
     int sockfd;
     bool to_next;
 };
+
 struct UserPipe {
-    int IOfd[2];
+    int pipefd[2];
     int from_user;
     int to_user;
 };
-
-User users[MAX_USER + 1];
-Pipefd pipefd_table[MAX_PIPEFD_NUM];
-UserPipe user_pipes[MAX_PIPEFD_NUM];
-int pipefd_length, user_pipe_length;
-char raw_command[MAX_COMMAND_LEN];
-
-void ChildHandler(int signo);
-int TCPconnect(uint16_t port);
-void BroadcastMsg(const char *msg);
-int LoginUser(fd_set &activefds, int server_sockfd);
-void LoginBroadcast(User user);
-void LogoutUser(fd_set &activefds, int sockfd);
-void LogoutBroadcast(User user);
-int GetUserIndex(int sockfd);
-void WriteWLCMMsg(int sockfd);
-bool IsBuildInCmd(int sockfd, CmdTable cmd_table);
-void Yell(int sockfd, const char *msg);
-void Name(int sockfd, const char *name);
-void Who(int sockfd);
-void Tell(int sockfd, int user_id, char *input);
-void Printenv(int sockfd, CmdTable cmd_table);
-void Setenv(int sockfd, CmdTable cmd_table);
-void SplitString(char *input, CmdTable &cmd_table);
-void ParseCmd(CmdTable cmd_table, int &index, ParsedCmd &command);
-void GetCmdPath(ParsedCmd command, char command_path[], int sockfd);
-void ExecCmd(ParsedCmd command, const char *command_path, pid_t pid_table[], int &pid_length, int stdIOfd[]);
-void CountdownPipefd(int sockfd);
-void CreatePipefd(int sockfd, ParsedCmd command, bool to_next);
-int GetInputfd(int sockfd, ParsedCmd command);
-int GetOutputfd(int sockfd, ParsedCmd &command);
-int GetErrorfd(int sockfd, ParsedCmd command);
-void CreateUserPipe(int from_user, int to_user);
-int GetUserPipeIndex(int from_user, int to_user);
-void ClosePipefd(int sockfd, int inputfd, ParsedCmd command);
-void ClearPipefd(int sockfd);
-
-int main(int argc, char* argv[]) {
-    setenv("PATH", "bin:.", 1);
-    if (argc != 2) {
-        cerr << "./np_single_proc [port]" << endl;
-        exit(1);
-    }
-
-    fd_set readfds, activefds;
-    int server_sockfd, port, fds_num;
-    pipefd_length = 0;
-    user_pipe_length = 0;
-
-    for (int i = 1; i <= MAX_USER; ++i) {
-        users[i].is_login = false;
-    }
-
-    port = atoi(argv[1]);
-    server_sockfd = TCPconnect(port);
-
-    // get fdtable size
-    fds_num = getdtablesize();
-    FD_ZERO(&activefds);
-    FD_SET(server_sockfd, &activefds);
-
-    while (true) {
-        memcpy(&readfds, &activefds, sizeof(readfds));
-
-        if (select(fds_num, &readfds, NULL, NULL, NULL) < 0) {
-            cerr << "Error: select error" << endl;
-            continue;
-        }
-
-        if (FD_ISSET(server_sockfd, &readfds)) {
-            int client_sockfd;
-            client_sockfd = LoginUser(activefds, server_sockfd);
-            write(client_sockfd, "% ", strlen("% "));
-        }
-        for (int sockfd = 0; sockfd < fds_num; ++sockfd) {
-            if (server_sockfd != sockfd && FD_ISSET(sockfd, &readfds)) {
-                CmdTable cmd_table;
-                char input[MAX_LINE_LEN];
-
-                char read_buffer[MAX_LINE_LEN];
-                memset(&input, '\0', sizeof(input));
-                do {
-                    memset(&read_buffer, '\0', sizeof(read_buffer));
-                    read(sockfd, read_buffer, sizeof(read_buffer));
-                    strcat(input, read_buffer);
-                } while (read_buffer[strlen(read_buffer) - 1] != '\n');
-
-                strtok(input, "\r\n");
-
-                strcpy(raw_command, input);
-                SplitString(input, cmd_table);
-                if (cmd_table.command_length == 0) {
-                    continue;
-                }
-                
-                if (!strcmp(cmd_table.commands[0], "exit")) {
-                    ClearPipefd(sockfd);
-                    LogoutUser(activefds, sockfd);
-                    continue;
-                }
-
-                CountdownPipefd(sockfd);
-                
-                if (!IsBuildInCmd(sockfd, cmd_table)) {
-                    pid_t pid_table[MAX_COMMAND_NUM];
-                    int pid_length = 0, index = 0;
-                    while (index < cmd_table.command_length) {
-                        int stdIOfd[3];
-                        char command_path[MAX_COMMAND_LEN];
-                        ParsedCmd cmd_list;
-                        ParseCmd(cmd_table, index, cmd_list);
-
-                        stdIOfd[0] = GetInputfd(sockfd, cmd_list);
-                        stdIOfd[1] = GetOutputfd(sockfd, cmd_list);
-                        stdIOfd[2] = GetErrorfd(sockfd, cmd_list);
-
-                        GetCmdPath(cmd_list, command_path, sockfd);
-                        ExecCmd(cmd_list, command_path, pid_table, pid_length, stdIOfd);
-                        
-                        ClosePipefd(sockfd, stdIOfd[0], cmd_list);
-                    }
-                }
-                write(sockfd, "% ", strlen("% "));
-            }
-        }
-    }
-}
 
 void ChildHandler(int signo) {
     int status;
@@ -234,84 +87,15 @@ int TCPconnect(uint16_t port) {
     return sockfd;
 }
 
-void BroadcastMsg(const char *msg) {
-    for (int i = 1; i <= MAX_USER; ++i) {
-        if (users[i].is_login) {
-            write(users[i].sockfd, msg, strlen(msg));
-        }
+void BroadcastMsg(string msg, vector<User>& users) {
+    for (int i = 0; i <= users.size(); ++i) {
+        if (users[i].is_login) write(users[i].sockfd, msg.c_str(), msg.length());
     }
 }
 
-int LoginUser(fd_set &activefds, int server_sockfd) {
-    int client_sockfd;
-    socklen_t addr_len;
-    sockaddr_in client_addr;
-
-    addr_len = sizeof(client_addr);
-    client_sockfd = accept(server_sockfd, (sockaddr *) &client_addr, &addr_len);
-    if (client_sockfd < 0) {
-        cerr << "Error: accept error" << endl;
-        exit(1);
-    }
-
-    FD_SET(client_sockfd, &activefds);
-
-    WriteWLCMMsg(client_sockfd);
-
-    // user init
-    for (int i = 1; i <= MAX_USER; ++i) {
-        if (users[i].is_login == false) {
-            strcpy(users[i].name, "(no name)");
-            char port[10];
-            sprintf(port, "%d", ntohs(client_addr.sin_port));
-            strcpy(users[i].ip_port, inet_ntoa(client_addr.sin_addr));
-            strcat(users[i].ip_port, ":");
-            strcat(users[i].ip_port, port);
-            users[i].sockfd = client_sockfd;
-            users[i].is_login = true;
-            users[i].env.length = 0;
-            strcpy(users[i].env.key[users[i].env.length], "PATH");
-            strcpy(users[i].env.value[users[i].env.length], "bin:.");
-            users[i].env.length++;
-
-            LoginBroadcast(users[i]);
-            break;
-        }
-    }
-
-    return client_sockfd;
-}
-
-void LoginBroadcast(User user) {
-    char msg[2000];
-    sprintf(msg, "*** User '%s' entered from %s. ***\n", user.name, user.ip_port);
-    BroadcastMsg(msg);
-}
-
-void LogoutUser(fd_set &activefds, int sockfd) {
-    FD_CLR(sockfd, &activefds);
-    int idx = GetUserIndex(sockfd);
-    if (idx != -1) {
-        users[idx].is_login = false;
-        close(users[idx].sockfd);
-        users[idx].sockfd = -1;
-        LogoutBroadcast(users[idx]);
-    }
-}
-
-void LogoutBroadcast(User user) {
-    char msg[2000];
-    sprintf(msg, "*** User '%s' left. ***\n", user.name);
-    BroadcastMsg(msg);
-}
-
-int GetUserIndex(int sockfd) {
-    for (int i = 1; i <= MAX_USER; ++i) {
-        if (sockfd == users[i].sockfd && users[i].is_login) {
-            return i;
-        }
-    }
-    return -1;
+void LoginBroadcast(vector<User>& users, User user) {
+    string msg = "*** User '" + user.name + "' entered from " + user.ip_port + ". ***\n";
+    BroadcastMsg(msg, users);
 }
 
 void WriteWLCMMsg(int sockfd) {
@@ -319,353 +103,375 @@ void WriteWLCMMsg(int sockfd) {
     write(sockfd, message, strlen(message));
 }
 
-bool IsBuildInCmd(int sockfd, CmdTable cmd_table) {
-
-    if (!strcmp(cmd_table.commands[0], "yell")) {
-        Yell(sockfd, cmd_table.commands[1]);
-    } else if (!strcmp(cmd_table.commands[0], "name")) {
-        Name(sockfd, cmd_table.commands[1]);
-    } else if (!strcmp(cmd_table.commands[0], "who")) {
-        Who(sockfd);
-    } else if (!strcmp(cmd_table.commands[0], "tell")) {
-        Tell(sockfd, atoi(cmd_table.commands[1]), cmd_table.commands[2]);
-    } else if (!strcmp(cmd_table.commands[0], "printenv")) {
-        Printenv(sockfd, cmd_table);
-    } else if (!strcmp(cmd_table.commands[0], "setenv")) {
-        Setenv(sockfd, cmd_table);
-    } else {
-        return false;
+int LoginUser(fd_set& activefds, int& server_sockfd, vector<User>& users) {
+    sockaddr_in client_addr;
+    socklen_t addr_len = sizeof(client_addr);
+    int client_sockfd = accept(server_sockfd, (sockaddr *) &client_addr, &addr_len);
+    if (client_sockfd < 0) {
+        cerr << "Error: accept error" << endl;
+        exit(1);
     }
+    FD_SET(client_sockfd, &activefds);
 
-    return true;
+    WriteWLCMMsg(client_sockfd);
+
+    // init new user
+    User new_user;
+    new_user.name = "(no name)";
+    string port = to_string(ntohs(client_addr.sin_port));
+    string ip_addr = inet_ntoa(client_addr.sin_addr);
+    new_user.ip_port = ip_addr + ":" + port;
+    new_user.sockfd = client_sockfd;
+    new_user.is_login = true;
+    new_user.env["PATH"] = "bin:.";
+    users.push_back(new_user);
+    LoginBroadcast(users, new_user);
+
+    return client_sockfd;
 }
 
-void Yell(int sockfd, const char *msg){
-    char output[MAX_MSG_LEN];
-    int idx = GetUserIndex(sockfd);
+int GetUserIndex(int sockfd, vector<User>& users) {
+    for (int i = 0; i <= users.size(); ++i) {
+        if (sockfd == users[i].sockfd && users[i].is_login) return i;
+    }
+    return -1;
+}
+
+void LogoutBroadcast(vector<User>& users, User user) {
+    string msg = "*** User '" + user.name + "' left. ***\n";
+    BroadcastMsg(msg, users);
+}
+
+void LogoutUser(int sockfd, fd_set &activefds, vector<User>& users) {
+    FD_CLR(sockfd, &activefds);
+    int idx = GetUserIndex(sockfd, users);
     if (idx != -1) {
-        sprintf(output, "*** %s yelled ***: %s\n", users[idx].name, msg);
-        BroadcastMsg(output);
+        users[idx].is_login = false;
+        close(users[idx].sockfd);
+        users[idx].sockfd = -1;
+        LogoutBroadcast(users, users[idx]);
     }
 }
 
-void Name(int sockfd, const char *name) {
-    char output[1024];
-    int idx = GetUserIndex(sockfd);
+void Yell(int sockfd, string msg, vector<User>& users) {
+    int idx = GetUserIndex(sockfd, users);
     if (idx != -1) {
-        for (int i = 1; i <= MAX_USER; ++i) {
-            if (!strcmp(users[i].name, name)) {
-                sprintf(output, "*** User '%s' already exists. ***\n", users[i].name);
-                write(sockfd, output, strlen(output));
+        string output = "*** " + users[idx].name + " yelled ***: " + msg + "\n";
+        BroadcastMsg(output, users);
+    }
+}
+
+void Name(int sockfd, string name, vector<User>& users) {
+    int idx = GetUserIndex(sockfd, users);
+    if (idx != -1) {
+        for (int i = 0; i <= users.size(); ++i) {
+            if (users[i].name == name) {
+                string output = "*** User '" + users[i].name + "' already exists. ***\n";
+                write(sockfd, output.c_str(), output.length());
                 return;
             }
         } 
-        strcpy(users[idx].name, name);
-        sprintf(output, "*** User from %s is named '%s'. ***\n", users[idx].ip_port, users[idx].name);
-        BroadcastMsg(output);
+        users[idx].name = name;
+        string output = "*** User from " + users[idx].ip_port + " is named '" + users[idx].name + "'. ***\n";
+        BroadcastMsg(output, users);
     }
 }
 
-void Printenv(int sockfd, CmdTable cmd_table) {
-    int idx = GetUserIndex(sockfd);
-    for (int i = 0; i < users[idx].env.length; ++i) {
-        if (!strcmp(cmd_table.commands[1], users[idx].env.key[i])) {
-            write(sockfd, users[idx].env.value[i], strlen(users[idx].env.value[i]));
-            write(sockfd, "\n", strlen("\n"));
-            return;
-        }
-    }
-    char *env = getenv(cmd_table.commands[1]);
-    write(sockfd, env, strlen(env));
-    write(sockfd, "\n", strlen("\n"));
-}
-
-void Who(int sockfd) {
+void Who(int sockfd, vector<User>& users) {
     char output[1024];
     strcpy(output, "<ID>\t<nickname>\t<IP:port>\t<indicate me>\n");
     write(sockfd, output, strlen(output));
 
-    for (int i = 1; i <= MAX_USER; ++i) {
+    for (int i = 0; i <= users.size(); ++i) {
         if (users[i].is_login) {
             if (users[i].sockfd == sockfd) {
-                sprintf(output, "%d\t%s\t%s\t%s\n", i, users[i].name, users[i].ip_port, "<-me");
+                sprintf(output, "%d\t%s\t%s\t%s\n", i, users[i].name.c_str(), users[i].ip_port.c_str(), "<-me");
             } else {
-                sprintf(output, "%d\t%s\t%s\n", i, users[i].name, users[i].ip_port);
+                sprintf(output, "%d\t%s\t%s\n", i, users[i].name.c_str(), users[i].ip_port.c_str());
             }
             write(sockfd, output, strlen(output));
         }
     }
 }
 
-void Tell(int sockfd, int user_id, char *msg) {
-    char output[MAX_MSG_LEN];
-    int idx = GetUserIndex(sockfd);
+void Tell(int sockfd, int user_id, string msg, vector<User>& users) {
+    int idx = GetUserIndex(sockfd, users);
     if (users[user_id].is_login) {
-        sprintf(output, "*** %s told you ***: %s\n", users[idx].name, msg);
-        write(users[user_id].sockfd, output, strlen(output));
+        string output = "*** " + users[idx].name + " told you ***: " + msg + "\n";
+        write(users[user_id].sockfd, output.c_str(), output.length());
     } else {
-        sprintf(output, "*** Error: user #%d does not exist yet. ***\n", user_id);
-        write(sockfd, output, strlen(output));
+        string output = "*** Error: user #" + to_string(user_id) + " does not exist yet. ***\n";
+        write(sockfd, output.c_str(), output.length());
     }
 }
 
-void Setenv(int sockfd, CmdTable cmd_table) {
-    int idx = GetUserIndex(sockfd);
-    for (int i = 0; i < users[idx].env.length; ++i) {
-        if (!strcmp(cmd_table.commands[1], users[idx].env.key[i])) {
-            strcpy(users[idx].env.value[i], cmd_table.commands[2]);
+void Printenv(int sockfd, vector<string>& cmd_table, vector<User>& users) {
+    int idx = GetUserIndex(sockfd, users);
+    for (auto it = users[idx].env.begin(); it != users[idx].env.end(); ++it) {
+        if (cmd_table[1] == it->first) {
+            write(sockfd, it->second.c_str(), it->second.length());
+            write(sockfd, "\n", strlen("\n"));
             return;
         }
     }
-
-    strcpy(users[idx].env.key[users[idx].env.length], cmd_table.commands[1]);
-    strcpy(users[idx].env.value[users[idx].env.length], cmd_table.commands[2]);
-    users[idx].env.length++;
+    char *env = getenv(cmd_table[1].c_str());
+    write(sockfd, env, strlen(env));
+    write(sockfd, "\n", strlen("\n"));
 }
 
-void SplitString(char *input, CmdTable &cmd_table) {
-    cmd_table.command_length = 0;
+void Setenv(int sockfd, vector<string>& cmd_table, vector<User>& users) {
+    int idx = GetUserIndex(sockfd, users);
+    users[idx].env[cmd_table[1]] = cmd_table[2];
+}
 
-    char delim[] = " \n";
-    char *pch = strtok(input, delim);
+bool IsBuildInCmd(int sockfd, vector<string>& cmd_table, vector<User>& users) {
+    if (cmd_table[0] == "yell") {
+        Yell(sockfd, cmd_table[1], users);
+    } else if (cmd_table[0] == "name") {
+        Name(sockfd, cmd_table[1], users);
+    } else if (cmd_table[0] == "who") {
+        Who(sockfd, users);
+    } else if (cmd_table[0] == "tell") {
+        Tell(sockfd, stoi(cmd_table[1]), cmd_table[2], users);
+    } else if (cmd_table[0] == "printenv") {
+        Printenv(sockfd, cmd_table, users);
+    } else if (cmd_table[0] == "setenv") {
+        Setenv(sockfd, cmd_table, users);
+    }
 
+    return false;
+}
+
+void SplitString(string buffer, vector<string>& cmd_table) {
     bool isBuildIn = false;
-    while (pch != NULL) {
-        cmd_table.commands[cmd_table.command_length++] = pch;
-        if ((!strcmp(cmd_table.commands[0], "yell") && cmd_table.command_length == 1) || 
-            (!strcmp(cmd_table.commands[0], "name") && cmd_table.command_length == 1) ||
-            (!strcmp(cmd_table.commands[0], "tell") && cmd_table.command_length == 2) ||
-            (!strcmp(cmd_table.commands[0], "printenv") && cmd_table.command_length == 1) ||
-            (!strcmp(cmd_table.commands[0], "setenv") && cmd_table.command_length == 2)) {
+    stringstream ss(buffer);
+    string tmp = "";
+    while (getline(ss, tmp, ' ') || getline(ss, tmp, '\n')) {
+        cmd_table.push_back(tmp);
+        if (((cmd_table[0] == "yell") && cmd_table.size() == 1) || 
+            ((cmd_table[0] == "name") && cmd_table.size() == 1) ||
+            ((cmd_table[0] == "tell") && cmd_table.size() == 2) ||
+            ((cmd_table[0] == "printenv") && cmd_table.size() == 1) ||
+            ((cmd_table[0] == "setenv") && cmd_table.size() == 2)) {
             isBuildIn = true;
             break;
         }
-        pch = strtok(NULL, delim);
     }
     if (isBuildIn) {
-        pch = strtok(NULL, "\n");
-        cmd_table.commands[cmd_table.command_length++] = pch;
+        getline(ss, tmp, '\n');
+        cmd_table.push_back(tmp);
     }
 }
 
-void ParseCmd(CmdTable cmd_table, int &index, ParsedCmd &cmd_list) {
+ParsedCommand ParseCmd(vector<string> cmd_table, int &index) {
+    ParsedCommand cmd_list;
     cmd_list.op = NONE;
     cmd_list.in_pipe = false;
     cmd_list.count = 0;
+    cmd_list.argv.push_back(cmd_table[index++]);
 
-    cmd_list.argc = 0;
-    cmd_list.argv[cmd_list.argc++] = cmd_table.commands[index++];
-    while (index < cmd_table.command_length) {
-        if (cmd_table.commands[index][0] == '|') {
-            if (cmd_table.commands[index][1] != '\0') {
-                cmd_list.count = atoi(&cmd_table.commands[index][1]);
+    while (index < cmd_table.size()) {
+        if (cmd_table[index][0] == '|') {
+            if (cmd_table[index][1] != '\0') {
                 cmd_list.op = NUMBER_PIPE;
-                break;
+                cmd_list.count = atoi(&cmd_table[index][1]);
             } else {
-                cmd_list.count = 0;
                 cmd_list.op = ORDINARY_PIPE;
-                break;
+                cmd_list.count = 0;
             }
-        } else if (cmd_table.commands[index][0] == '!') {
-            cmd_list.count = atoi(&cmd_table.commands[index][1]);
-            cmd_list.op = NUMBER_PIPE_ERR;
             break;
-        } else if (cmd_table.commands[index][0] == '>') {
-            if (cmd_table.commands[index][1] != '\0') {
-                cmd_list.to_user = atoi(&cmd_table.commands[index][1]);
+        } else if (cmd_table[index][0] == '!') {
+            cmd_list.op = NUMBER_PIPE_ERR;
+            cmd_list.count = atoi(&cmd_table[index][1]);
+            break;
+        } else if (cmd_table[index][0] == '>') {
+            if (cmd_table[index][1] != '\0') {
                 cmd_list.op = USER_PIPE_OUT;
+                cmd_list.to_user = atoi(&cmd_table[index][1]);
 
-                if (cmd_table.command_length > index + 1 && cmd_table.commands[index + 1][0] == '<') {
+                if (index + 1 < cmd_table.size() && cmd_table[index + 1][0] == '<') {
                     index++;
                     continue;
                 }
-                break;
+            } else {
+                cmd_list.op = FILE_REDIRECTION;
+                cmd_list.filename = cmd_table[index + 1];
+                index++;
             }
-            strcpy(cmd_list.filename, cmd_table.commands[index + 1]);
-            index++;
-            cmd_list.op = FILE_REDIRECTION;
             break;
-        } else if (cmd_table.commands[index][0] == '<') {
-            cmd_list.from_user = atoi(&cmd_table.commands[index][1]);
+        } else if (cmd_table[index][0] == '<') {
+            cmd_list.from_user = atoi(&cmd_table[index][1]);
             cmd_list.in_pipe = true;
         } else {
-            cmd_list.argv[cmd_list.argc++] = cmd_table.commands[index];
+            cmd_list.argv.push_back(cmd_table[index]);
         }
         index++;
     }
-
-    cmd_list.argv[cmd_list.argc] = NULL;
     index++;
+
+    return cmd_list;
 }
 
-void GetCmdPath(ParsedCmd cmd_list, char command_path[], int sockfd) {
-    int idx = GetUserIndex(sockfd);
+string GetPath(ParsedCommand cmd_list, vector<User>& users, int sockfd) {
+    string cmd_path = "";
+    int idx = GetUserIndex(sockfd, users);
     if (idx != -1) {
-        char myenv[MAX_COMMAND_LEN];
-        strcpy(myenv, users[idx].env.value[0]);
-        char delim[] = ":";
-        char *pch = strtok(myenv, delim);
+        stringstream ss(users[idx].env["PATH"].c_str());
 
-        while (pch != NULL) {
-            strcpy(command_path, pch);
-            if (!access(strcat(strcat(command_path, "/"), cmd_list.argv[0]), X_OK)) {
-                return;
-            }
-            pch = strtok(NULL, delim);
+        while (getline(ss, cmd_path, ':')) {
+            cmd_path += "/" + cmd_list.argv[0];
+            if (!access(cmd_path.c_str(), X_OK)) return cmd_path;
         }
-
-        strcpy(command_path, "");
     }
-
+    cmd_path = "";
+    
+    return cmd_path;
 }
 
-void ExecCmd(ParsedCmd cmd_list, const char *command_path, pid_t pid_table[], int &pid_length, int stdIOfd[]) {
+void ExecCmd(ParsedCommand cmd_list, string cmd_path, vector<pid_t> pid_table, int fd[]) {
     signal(SIGCHLD, ChildHandler);
-    pid_t pid;
 
-    pid = fork();
+    pid_t pid = fork();
     while (pid < 0) {
         int status;
         waitpid(-1, &status, 0);
         pid = fork();
     }
     if (pid == 0) {
-        dup2(stdIOfd[0], STDIN_FILENO);
-        dup2(stdIOfd[1], STDOUT_FILENO);
-        dup2(stdIOfd[2], STDERR_FILENO);
+        dup2(fd[0], STDIN_FILENO);
+        dup2(fd[1], STDOUT_FILENO);
+        dup2(fd[2], STDERR_FILENO);
 
-        if (stdIOfd[0] != STDIN_FILENO) {
-            close(stdIOfd[0]);
-        }
-        if (stdIOfd[1] != STDOUT_FILENO) {
-            close(stdIOfd[1]);
-        }
-        if (stdIOfd[2] != STDERR_FILENO) {
-            close(stdIOfd[2]);
-        }
+        if (fd[0] != STDIN_FILENO) close(fd[0]);
+        if (fd[1] != STDOUT_FILENO) close(fd[1]);
+        if (fd[2] != STDERR_FILENO) close(fd[2]);
 
-        if (!strcmp(command_path, "")) {
+        if (cmd_path == "") {
             cerr << "Unknown command: [" << cmd_list.argv[0] << "]." << endl;
         } else {
-            execvp(command_path, cmd_list.argv);
+            char* tmp[cmd_list.argv.size() + 1];
+            for (int i = 0; i < cmd_list.argv.size(); ++i) tmp[i] = strdup(cmd_list.argv[i].c_str());
+            tmp[cmd_list.argv.size()] = NULL;
+            while (execvp(cmd_path.c_str(), tmp) < 0) cerr << "error exec" << endl;
+            for (int i = 0; tmp[i] != NULL; ++i) free(tmp[i]);
         }
 
         exit(0);
     } else {
-        pid_table[pid_length++] = pid;
-        if (cmd_list.op == NONE || cmd_list.op == FILE_REDIRECTION) {
-            if (cmd_list.op == NONE) {
-                pid_table[pid_length++] = pid;
-                for (int i = 0; i < pid_length; ++i) {
-                    int status;
-                    waitpid(pid_table[i], &status, 0);
-                }
+        pid_table.push_back(pid);
+        if (cmd_list.op == NONE || cmd_list.op == FILE_REDIRECTION || cmd_list.op == USER_PIPE_NULL) {
+            for (int i = 0; i < pid_table.size(); ++i) {
+                int status;
+                waitpid(pid_table[i], &status, 0);
             }
-            if (cmd_list.op == FILE_REDIRECTION) {
-                close(stdIOfd[1]);
-            }
-            if (cmd_list.op == USER_PIPE_NULL) {
-                pid_table[pid_length++] = pid;
-                for (int i = 0; i < pid_length; ++i) {
-                    int status;
-                    waitpid(pid_table[i], &status, 0);
-                }
-                close(stdIOfd[1]);
+            if (cmd_list.op == FILE_REDIRECTION || cmd_list.op == USER_PIPE_NULL) {
+                close(fd[1]);
             }
         }
     }
 }
 
-void CountdownPipefd(int sockfd) {
-    for (int i = 0; i < pipefd_length; ++i) {
-        if (pipefd_table[i].sockfd == sockfd) {
-            pipefd_table[i].count -= 1;
-        }
+void CountdownPipefd(int sockfd, vector<Pipefd> &pipefd_table) {
+    for (int i = 0; i < pipefd_table.size(); ++i) {
+        if (pipefd_table[i].sockfd == sockfd) pipefd_table[i].count--;
     }
 }
 
-void CreatePipefd(int sockfd, ParsedCmd cmd_list, bool to_next) {
-    pipe(pipefd_table[pipefd_length].IOfd);
-    pipefd_table[pipefd_length].sockfd = sockfd;
-    pipefd_table[pipefd_length].count = cmd_list.count;
-    pipefd_table[pipefd_length].to_next = to_next;
-    pipefd_length++;
+int GetUserPipeIndex(vector<UserPipe>& user_pipes, int from_user, int to_user) {
+    for (int i = 0; i < user_pipes.size(); ++i) {
+        if (user_pipes[i].from_user == from_user && user_pipes[i].to_user == to_user) return i;
+    }
+    return -1;
 }
 
-int GetInputfd(int sockfd, ParsedCmd cmd_list) {
+int CreatePipefd(vector<Pipefd> &pipefd_table, ParsedCommand cmd_list, bool to_next, int sockfd) {
+    Pipefd new_pipe;
+    pipe(new_pipe.pipefd);
+    new_pipe.sockfd = sockfd;
+    new_pipe.count = cmd_list.count;
+    new_pipe.to_next = to_next;
+    pipefd_table.push_back(new_pipe);
+    
+    return pipefd_table.back().pipefd[1];
+}
+
+void CreateUserPipe(vector<UserPipe>& user_pipes, int from_user, int to_user) {
+    UserPipe new_user_pipe;
+    new_user_pipe.from_user = from_user;
+    new_user_pipe.to_user = to_user;
+    pipe(new_user_pipe.pipefd);
+    user_pipes.push_back(new_user_pipe);
+}
+
+int GetInputfd(int sockfd, ParsedCommand cmd_list, vector<Pipefd> &pipefd_table, vector<UserPipe>& user_pipes, vector<User>& users, string buffer) {
     if (cmd_list.in_pipe) {
-        char msg[3000];
-        int from_user = cmd_list.from_user, to_user = GetUserIndex(sockfd);
+        int from_user = cmd_list.from_user, to_user = GetUserIndex(sockfd, users);
 
         if (users[from_user].is_login == false) {
-            sprintf(msg, "*** Error: user #%d does not exist yet. ***\n", from_user);
-            write(sockfd, msg, strlen(msg));
-            int fd = open("/dev/null", O_RDONLY);
-            return fd;
+            string msg = "*** Error: user #" + to_string(from_user) + " does not exist yet. ***\n";
+            write(sockfd, msg.c_str(), msg.length());
+
+            return open("/dev/null", O_RDONLY);
         } else {
-            int user_pipe_idx = GetUserPipeIndex(from_user, to_user);
+            int user_pipe_idx = GetUserPipeIndex(user_pipes, from_user, to_user);
+
             if (user_pipe_idx == -1) {
-                sprintf(msg, "*** Error: the pipe #%d->#%d does not exist yet. ***\n", from_user, to_user);
-                write(sockfd, msg, strlen(msg));
-                int fd = open("/dev/null", O_RDONLY);
-                return fd;
+                string msg = "*** Error: the pipe #" + to_string(from_user) + "->#" + to_string(to_user) + " does not exist yet. ***\n";
+                write(sockfd, msg.c_str(), msg.length());
+
+                return open("/dev/null", O_RDONLY);
             } else {
-                sprintf(msg, "*** %s (#%d) just received from %s (#%d) by '%s' ***\n", users[to_user].name, to_user, users[from_user].name, from_user, raw_command);
-                BroadcastMsg(msg);
-                close(user_pipes[user_pipe_idx].IOfd[1]);
-                return user_pipes[user_pipe_idx].IOfd[0];
+                string msg = "*** " + users[to_user].name + " (#" + to_string(to_user) + ") just received from " + users[from_user].name + " (#" + to_string(from_user) + ") by '" + buffer + "' ***\n";
+                BroadcastMsg(msg, users);
+                close(user_pipes[user_pipe_idx].pipefd[1]);
+
+                return user_pipes[user_pipe_idx].pipefd[0];
             }
         }
-    }
-    for (int i = 0; i < pipefd_length; ++i) {
-        if (pipefd_table[i].count == 0 && pipefd_table[i].sockfd == sockfd) {
-            close(pipefd_table[i].IOfd[1]);
-            pipefd_table[i].IOfd[1] = -1;
+    } else {
+        for (int i = 0; i < pipefd_table.size(); ++i) {
+            if (pipefd_table[i].count == 0 && pipefd_table[i].sockfd == sockfd) {
+                close(pipefd_table[i].pipefd[1]);
+                pipefd_table[i].pipefd[1] = -1;
 
-            return pipefd_table[i].IOfd[0];
+                return pipefd_table[i].pipefd[0];
+            }
         }
     }
 
     return STDIN_FILENO;
 }
 
-int GetOutputfd(int sockfd, ParsedCmd &cmd_list) {
+int GetOutputfd(int sockfd, ParsedCommand &cmd_list, vector<Pipefd> &pipefd_table, vector<UserPipe>& user_pipes, vector<User>& users, string buffer) {
     if (cmd_list.op == NUMBER_PIPE || cmd_list.op == NUMBER_PIPE_ERR) {
-        for (int i = 0; i < pipefd_length; ++i) {
-            if (pipefd_table[i].count == cmd_list.count && pipefd_table[i].sockfd == sockfd) {
-                return pipefd_table[i].IOfd[1];
-            }
+        for (int i = 0; i < pipefd_table.size(); ++i) {
+            if (pipefd_table[i].count == cmd_list.count && pipefd_table[i].sockfd == sockfd) return pipefd_table[i].pipefd[1];
         }
-        CreatePipefd(sockfd, cmd_list, false);
-        return pipefd_table[pipefd_length - 1].IOfd[1];
+        return CreatePipefd(pipefd_table, cmd_list, false, sockfd);
     } else if (cmd_list.op == ORDINARY_PIPE) {
-        CreatePipefd(sockfd, cmd_list, true);
-        return pipefd_table[pipefd_length - 1].IOfd[1];
+        return CreatePipefd(pipefd_table, cmd_list, true, sockfd);
     } else if (cmd_list.op == FILE_REDIRECTION) {
-        int fd = open(cmd_list.filename, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
-        return fd;
+        return open(cmd_list.filename.c_str(), O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
     } else if (cmd_list.op == USER_PIPE_OUT) {
-        char msg[3000];
-        int from_user = GetUserIndex(sockfd), to_user = cmd_list.to_user;
+        int from_user = GetUserIndex(sockfd, users), to_user = cmd_list.to_user;
         if (to_user > MAX_USER || users[to_user].is_login == false) {
-            sprintf(msg, "*** Error: user #%d does not exist yet. ***\n", to_user);
-            write(sockfd, msg, strlen(msg));
             cmd_list.op = USER_PIPE_NULL;
-            int fd = open("/dev/null", O_WRONLY);
-            return fd;
+            string msg = "*** Error: user #" + to_string(to_user) + " does not exist yet. ***\n";
+            write(sockfd, msg.c_str(), msg.length());
+            return open("/dev/null", O_WRONLY);;
         } else {
-            int user_pipe_idx = GetUserPipeIndex(from_user, to_user);
+            int user_pipe_idx = GetUserPipeIndex(user_pipes, from_user, to_user);
+
             if (user_pipe_idx != -1) {
-                sprintf(msg, "*** Error: the pipe #%d->#%d already exists. ***\n", from_user, to_user);
-                write(sockfd, msg, strlen(msg));
                 cmd_list.op = USER_PIPE_NULL;
-                int fd = open("/dev/null", O_WRONLY);
-                return fd;
+                string msg = "*** Error: the pipe #" + to_string(from_user) + "->#" + to_string(to_user) + " already exists. ***\n";
+                write(sockfd, msg.c_str(), msg.length());
+                return open("/dev/null", O_WRONLY);;
             } else {
-                sprintf(msg, "*** %s (#%d) just piped '%s' to %s (#%d) ***\n", users[from_user].name, from_user, raw_command, users[to_user].name, to_user);
-                BroadcastMsg(msg);
-                CreateUserPipe(from_user, to_user);
-                return user_pipes[user_pipe_length - 1].IOfd[1];
+                string msg = "*** " + users[from_user].name + " (#" + to_string(from_user) + ") just piped '" + buffer + "' to " + users[to_user].name + " (#" + to_string(to_user) + ") ***\n";
+                BroadcastMsg(msg, users);
+                CreateUserPipe(user_pipes, from_user, to_user);
+                return user_pipes.back().pipefd[1];
             }
         }
     }
@@ -673,97 +479,144 @@ int GetOutputfd(int sockfd, ParsedCmd &cmd_list) {
     return sockfd;
 }
 
-int GetErrorfd(int sockfd, ParsedCmd cmd_list) {
+int GetErrorfd(int sockfd, ParsedCommand cmd_list, vector<Pipefd>& pipefd_table) {
     if (cmd_list.op == NUMBER_PIPE_ERR) {
-        for (int i = 0; i < pipefd_length; ++i) {
-            if (pipefd_table[i].count == cmd_list.count && pipefd_table[i].sockfd == sockfd) {
-                return pipefd_table[i].IOfd[1];
-            }
+        for (int i = 0; i < pipefd_table.size(); ++i) {
+            if (pipefd_table[i].count == cmd_list.count && pipefd_table[i].sockfd == sockfd) return pipefd_table[i].pipefd[1];
         }
-        CreatePipefd(sockfd, cmd_list, false);
-        return pipefd_table[pipefd_length - 1].IOfd[1];
+        return CreatePipefd(pipefd_table, cmd_list, false, sockfd);
     }
 
     return sockfd;
 }
 
-void CreateUserPipe(int from_user, int to_user) {
-    user_pipes[user_pipe_length].from_user = from_user;
-    user_pipes[user_pipe_length].to_user = to_user;
-    pipe(user_pipes[user_pipe_length].IOfd);
-    user_pipe_length++;
-}
-
-int GetUserPipeIndex(int from_user, int to_user) {
-    for (int i = 0; i < user_pipe_length; ++i) {
-        if (user_pipes[i].from_user == from_user && user_pipes[i].to_user == to_user) {
-            return i;
-        }
-    }
-    return -1;
-}
-
-void ClosePipefd(int sockfd, int inputfd, ParsedCmd cmd_list) {
-    for (int i = 0; i < pipefd_length; ++i) {
-        if (pipefd_table[i].sockfd == sockfd) {
-            if (pipefd_table[i].count <= 0 && pipefd_table[i].to_next == false) {
-                close(pipefd_table[i].IOfd[0]);
-                
-                pipefd_length -= 1;
-
-                Pipefd temp = pipefd_table[pipefd_length];
-                pipefd_table[pipefd_length] = pipefd_table[i];
-                pipefd_table[i] = temp;
-
-                i -= 1;
-            } else if (pipefd_table[i].to_next == true) {
-                pipefd_table[i].to_next = false;
-            }
+void ClosePipefd(int sockfd, ParsedCommand cmd_list, vector<Pipefd>& pipefd_table, vector<UserPipe>& user_pipes, vector<User>& users, int inputfd) {
+    for (int i = 0; i < pipefd_table.size(); ++i) {
+        if (pipefd_table[i].sockfd == sockfd && pipefd_table[i].count <= 0 && pipefd_table[i].to_next == false) {
+            close(pipefd_table[i].pipefd[0]);
+            pipefd_table[i].pipefd[0] = -1;
+            
+            pipefd_table.erase(pipefd_table.begin() + i);
+            i--;
+        } else if (pipefd_table[i].to_next == true) {
+            pipefd_table[i].to_next = false;
         }
     }
 
     if (cmd_list.in_pipe) {
-        int to_user = GetUserIndex(sockfd), from_user = cmd_list.from_user;
-        int user_pipe_idx = GetUserPipeIndex(from_user, to_user);
+        int to_user = GetUserIndex(sockfd, users), from_user = cmd_list.from_user;
+        int user_pipe_idx = GetUserPipeIndex(user_pipes, from_user, to_user);
         if (user_pipe_idx != -1) {
-            close(user_pipes[user_pipe_idx].IOfd[0]);
-            UserPipe temp = user_pipes[user_pipe_length - 1];
-            user_pipes[user_pipe_length - 1] = user_pipes[user_pipe_idx];
-            user_pipes[user_pipe_idx] = temp;
-            user_pipe_length--;
+            close(user_pipes[user_pipe_idx].pipefd[0]);
+            user_pipes.erase(user_pipes.begin() + user_pipe_idx);
         } else {
             close(inputfd);
         }
     }
 }
 
-void ClearPipefd(int sockfd) {
-    for (int i = 0; i < pipefd_length; ++i) {
+void ClearPipefd(int sockfd, vector<Pipefd>& pipefd_table, vector<UserPipe>& user_pipes, vector<User>& users) {
+    for (int i = 0; i < pipefd_table.size(); ++i) {
         if (pipefd_table[i].sockfd == sockfd) {
-            close(pipefd_table[i].IOfd[0]);
-            close(pipefd_table[i].IOfd[1]);
+            close(pipefd_table[i].pipefd[0]);
+            close(pipefd_table[i].pipefd[1]);
 
-            pipefd_length -= 1;
-
-            Pipefd temp = pipefd_table[pipefd_length];
-            pipefd_table[pipefd_length] = pipefd_table[i];
-            pipefd_table[i] = temp;
-            i -= 1;
+            pipefd_table.erase(pipefd_table.begin() + i);
+            i--;
         }
     }
 
-    int idx = GetUserIndex(sockfd);
-    for (int i = 0; i < user_pipe_length; ++i) {
+    int idx = GetUserIndex(sockfd, users);
+    for (int i = 0; i < user_pipes.size(); ++i) {
         if (user_pipes[i].from_user == idx || user_pipes[i].to_user == idx) {
-            close(user_pipes[i].IOfd[0]);
-            close(user_pipes[i].IOfd[1]);
+            close(user_pipes[i].pipefd[0]);
+            close(user_pipes[i].pipefd[1]);
 
-            user_pipe_length -= 1;
-            UserPipe temp = user_pipes[user_pipe_length];
-            user_pipes[user_pipe_length] = user_pipes[i];
-            user_pipes[i] = temp;
-            i -= 1;
+            user_pipes.erase(user_pipes.begin() + i);
+            i--;
+        }
+    }
+}
 
+int main(int argc, char* argv[]) {
+    vector<User> users;
+    vector<UserPipe> user_pipes;
+    vector<Pipefd> pipefd_table;
+    setenv("PATH", "bin:.", 1);
+    if (argc != 2) {
+        cerr << "./np_single_proc [port]" << endl;
+        exit(1);
+    }
+    
+    int server_sockfd = TCPconnect(atoi(argv[1]));
+
+    /* 
+    FD_ZERO(fd_set *): clear the fd_set
+    FD_SET(int, fd_set*): add fd to a set
+    FD_CLR(int, fd_set*): delete fd from a set
+    FD_ISSET(int, fd_set*): check if a fd is accessible
+    int select(int maxfdp, fd_set *readfds, fd_set *writefds, fd_set *errorfds, struct timeval *timeout):
+    non-blocking monitoring the fds
+    */
+    fd_set readfds, activefds;
+    int fds_max_num = getdtablesize(); // get fdtable size
+    FD_ZERO(&activefds);
+    FD_SET(server_sockfd, &activefds);
+
+    while (true) {
+        memcpy(&readfds, &activefds, sizeof(activefds));
+
+        if (select(fds_max_num, &readfds, NULL, NULL, NULL) < 0) {
+            cerr << "Error: select error" << endl;
+            continue;
+        }
+        if (FD_ISSET(server_sockfd, &readfds)) {
+            int client_sockfd = LoginUser(activefds, server_sockfd, users);
+            write(client_sockfd, "% ", strlen("% "));
+        }
+        for (int sockfd = 0; sockfd < fds_max_num; ++sockfd) {
+            if (server_sockfd != sockfd && FD_ISSET(sockfd, &readfds)) {
+                char read_buffer[MAX_LINE_LEN];
+                char input[MAX_LINE_LEN];
+                
+                // write(sockfd, "% ", strlen("% "));
+                memset(&input, '\0', sizeof(input));
+                do {
+                    memset(&read_buffer, '\0', sizeof(read_buffer));
+                    read(sockfd, read_buffer, sizeof(read_buffer));
+                    strcat(input, read_buffer);
+                } while (read_buffer[strlen(read_buffer) - 1] != '\n');
+                strtok(input, "\r\n");
+                
+                string buffer = input;
+                vector<string> cmd_table;
+                vector<pid_t> pid_table;
+                int index = 0;
+                SplitString(buffer, cmd_table);
+                if (cmd_table.size() == 0) continue;
+                if (cmd_table[0] == "exit") {
+                    ClearPipefd(sockfd, pipefd_table, user_pipes, users);
+                    LogoutUser(sockfd, activefds, users);
+                    continue;
+                }
+
+                CountdownPipefd(sockfd, pipefd_table);
+                
+                if (!IsBuildInCmd(sockfd, cmd_table, users)) {
+                    while (index < cmd_table.size()) {
+                        int fd[3];
+                        ParsedCommand cmd_list = ParseCmd(cmd_table, index);
+
+                        fd[0] = GetInputfd(sockfd, cmd_list, pipefd_table, user_pipes, users, buffer);
+                        fd[1] = GetOutputfd(sockfd, cmd_list, pipefd_table, user_pipes, users, buffer);
+                        fd[2] = GetErrorfd(sockfd, cmd_list, pipefd_table);
+
+                        string cmd_path = GetPath(cmd_list, users, sockfd);
+                        ExecCmd(cmd_list, cmd_path, pid_table, fd);
+                        ClosePipefd(sockfd, cmd_list, pipefd_table, user_pipes, users, fd[0]);
+                    }
+                }
+            }
         }
     }
 }

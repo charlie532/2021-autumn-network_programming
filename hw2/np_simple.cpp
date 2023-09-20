@@ -1,113 +1,47 @@
-#include <cstdio>
-#include <cstdlib>
 #include <iostream>
-#include <unistd.h>
-#include <stdio.h>
-#include <stdlib.h>
+#include <sstream>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <netinet/in.h>
 #include <fcntl.h>
+#include <map>
+#include <string>
+#include <vector>
 
 using namespace std;
 
 #define MAX_LINE_LEN 15000
-#define MAX_COMMAND_NUM 5000
-#define MAX_COMMAND_LEN 1000
-#define MAX_ARGV_LEN 256
-#define MAX_FILENAME_LEN 1000
-#define MAX_PIPEFD_NUM 1024
-#define ENV_NUM 100
-#define ENV_LEN 500
 
-const int NONE = 1;
-const int ORDINARY_PIPE = 2;
-const int NUMBER_PIPE = 3;
-const int NUMBER_PIPE_ERR = 4;
-const int FILE_REDIRECTION = 5;
+#define NONE 1
+#define ORDINARY_PIPE 2
+#define NUMBER_PIPE 3
+#define NUMBER_PIPE_ERR 4
+#define FILE_REDIRECTION 5
+
+struct ParsedCommand {
+    int op;
+    int count;
+    vector<string> argv;
+    string filename;
+};
 
 struct Pipefd {
-    int IOfd[2];
+    int pipefd[2];
     int count;
     bool to_next;
 };
 
-struct CmdTable {
-    char *commands[MAX_COMMAND_NUM];
-    int length;
-};
-
-struct ParsedCmd {
-    int length;
-    int op;
-    int count;
-    char *argv[MAX_ARGV_LEN];
-    char filename[MAX_FILENAME_LEN];
-};
-
-struct EnvTable {
-    char key[ENV_NUM][ENV_LEN];
-    char value[ENV_NUM][ENV_LEN];
-    int length;
-};
-
-int TCPconnect(uint16_t port);
-void ChildHandler(int signo);
-void ExecSocket(int client_sockfd, EnvTable &env);
-void SplitString(char *input, CmdTable &cmd_table);
-bool IsBuildInCmd(CmdTable cmd_table, EnvTable &env, int sockfd);
-void ParseCmd(CmdTable cmd_table, int &index, ParsedCmd &cmd_list);
-void GetPath(ParsedCmd cmd_list, char command_path[], EnvTable env);
-void ExecCmd(ParsedCmd cmd_list, const char *command_path, pid_t pid_table[], int &pid_length, int stdIOfd[]);
-void CountdownPipefd(Pipefd pipefd_table[], int pipefd_length);
-void CreatePipefd(Pipefd pipefd_table[], int &pipefd_length, ParsedCmd cmd_list, bool to_next);
-void GetStdIOfd(Pipefd pipefd_table[], int &pipefd_length, int sockfd, ParsedCmd cmd_list, int stdIOfd[]);
-void ClosePipefd(Pipefd pipefd_table[], int &pipefd_length);
-
-int main(int argc, char* argv[]) {
-    setenv("PATH", "bin:.", 1);
-    if (argc != 2) {
-        cerr << "./np_simple [port]" << endl;
-        exit(1);
-    }
-
-    int server_sockfd, client_sockfd, port;
-    socklen_t addr_len;
-    sockaddr_in client_addr;
-
-    port = atoi(argv[1]);
-    server_sockfd = TCPconnect(port);
-    // cout << "server sockfd: " << server_sockfd << endl;
-
-    while (true) {
-        addr_len = sizeof(client_addr);
-        client_sockfd = accept(server_sockfd, (sockaddr *) &client_addr, &addr_len);
-        if (client_sockfd < 0) {
-            cerr << "Error: accept failed" << endl;
-            continue;
-        }
-        // cout << "client sockfd: " << client_sockfd << endl;
-
-        EnvTable env = {
-            .length = 0
-        };
-        strcpy(env.key[env.length], "PATH");
-        strcpy(env.value[env.length], "bin:.");
-        env.length++;
-
-        ExecSocket(client_sockfd, env);
-
-        close(client_sockfd);
-    }
-    close(server_sockfd);
-    return 0;
+void ChildHandler(int signo) {
+    int status;
+    while (waitpid(-1, &status, WNOHANG) > 0) {}
 }
 
 int TCPconnect(uint16_t port) {
     int sockfd, optval = 1;
     sockaddr_in serv_addr;
 
+    // AF_INET: IPv4, SOCK_STREAM: TCP
     sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd < 0) {
         cerr << "Error: socket failed" << endl;
@@ -135,102 +69,28 @@ int TCPconnect(uint16_t port) {
     return sockfd;
 }
 
-void ChildHandler(int signo) {
-    int status;
-    while (waitpid(-1, &status, WNOHANG) > 0) {}
-}
-
-void ExecSocket(int sockfd, EnvTable &env) {
-    char input[MAX_LINE_LEN];
-    memset(&input, '\0', sizeof(input));
-    int pipefd_length = 0;
-    Pipefd pipefd_table[MAX_PIPEFD_NUM];
-
-    while (true) {
-        CmdTable cmd_table;
-        char read_buffer[MAX_LINE_LEN];
-        pid_t pid_table[MAX_COMMAND_NUM];
-        int pid_length = 0;
-        int index = 0;
-
-        write(sockfd, "% ", strlen("% "));
-        
-        memset(&input, '\0', sizeof(input));
-        do {
-            memset(&read_buffer, '\0', sizeof(read_buffer));
-            read(sockfd, read_buffer, sizeof(read_buffer));
-            strcat(input, read_buffer);
-        } while (read_buffer[strlen(read_buffer) - 1] != '\n');
-
-        strtok(input, "\r\n");
-
-        if (!strcmp(input, "")) {
-            continue;
-        }
-        if (!strcmp(input, "exit")) {
-            return;
-        }
-
-        CountdownPipefd(pipefd_table, pipefd_length);
-
-        SplitString(input, cmd_table);
-
-        while (index < cmd_table.length) {
-            if (!IsBuildInCmd(cmd_table, env, sockfd)) {
-                int stdIOfd[3];
-                ParsedCmd cmd_list;
-                char command_path[MAX_COMMAND_LEN];
-
-                ParseCmd(cmd_table, index, cmd_list);
-
-                GetStdIOfd(pipefd_table, pipefd_length, sockfd, cmd_list, stdIOfd);
-
-                GetPath(cmd_list, command_path, env);
-                ExecCmd(cmd_list, command_path, pid_table, pid_length, stdIOfd);
-                ClosePipefd(pipefd_table, pipefd_length);
-            } else {
-                break;
-            }
-        }
+void SplitString(string buffer, vector<string>& cmd_table) {
+    stringstream ss(buffer);
+    string tmp = "";
+    while (getline(ss, tmp, ' ') || getline(ss, tmp, '\n')) {
+        cmd_table.push_back(tmp);
     }
 }
 
-void SplitString(char *input, CmdTable &cmd_table) {
-    cmd_table.length = 0;
-    char delim[] = " \n";
-    char *pch = strtok(input, delim);
-
-    while (pch != NULL) {
-        cmd_table.commands[cmd_table.length++] = pch;
-        pch = strtok(NULL, delim);
-    }
-}
-
-bool IsBuildInCmd(CmdTable cmd_table, EnvTable &env, int sockfd) {
-    if (!strcmp(cmd_table.commands[0], "setenv")) {
-        for (int i = 0; i < env.length; ++i) {
-            if (!strcmp(env.key[i], cmd_table.commands[1])) {
-                strcpy(env.value[i], cmd_table.commands[2]);
-                return true;
-            }
-        }
-        strcpy(env.key[env.length], cmd_table.commands[1]);
-        strcpy(env.value[env.length], cmd_table.commands[2]);
-        env.length++;
+bool IsBuildInCmd(vector<string> cmd_table, map<string, string>& env, int sockfd) {
+    if (cmd_table[0] == "setenv") {
+        env[cmd_table[1]] = cmd_table[2];
         return true;
-
-    } else if (!strcmp(cmd_table.commands[0], "printenv")) {
-        for (int i = 0; i < env.length; ++i) {
-            if (!strcmp(env.key[i], cmd_table.commands[1])) {
-                write(sockfd, env.value[i], strlen(env.value[i]));
+    } else if (cmd_table[0] == "printenv") {
+        for (auto it = env.begin(); it != env.end(); ++it) {
+            if (it->first == cmd_table[1]) {
+                write(sockfd, it->second.c_str(), it->second.length());
                 write(sockfd, "\n", strlen("\n"));
                 return true;
             }
         }
-        char *myenv = getenv(cmd_table.commands[1]);
-        if (myenv) {
-            write(sockfd, myenv, strlen(myenv));
-        }
+        char *myenv = getenv(cmd_table[1].c_str());
+        if (myenv) write(sockfd, myenv, strlen(myenv));
         write(sockfd, "\n", strlen("\n"));
         return true;
     }
@@ -238,212 +98,244 @@ bool IsBuildInCmd(CmdTable cmd_table, EnvTable &env, int sockfd) {
     return false;
 }
 
-void ParseCmd(CmdTable cmd_table, int &index, ParsedCmd &cmd_list) {
+ParsedCommand ParseCmd(vector<string> cmd_table, int& index) {
+    ParsedCommand cmd_list;
     cmd_list.op = NONE;
     cmd_list.count = 0;
-
-    cmd_list.length = 0;
-    cmd_list.argv[cmd_list.length++] = cmd_table.commands[index++];
-    while (index < cmd_table.length) {
-        if (cmd_table.commands[index][0] == '|') {
-            if (cmd_table.commands[index][1] != '\0') {
-                cmd_list.count = atoi(&cmd_table.commands[index][1]);
+    cmd_list.argv.push_back(cmd_table[index++]);
+    
+    while (index < cmd_table.size()) {
+        if (cmd_table[index][0] == '|') {
+            if (cmd_table[index][1] != '\0') {
                 cmd_list.op = NUMBER_PIPE;
-                break;
+                cmd_list.count = stoi(&cmd_table[index][1]);
             } else {
-                cmd_list.count = 0;
                 cmd_list.op = ORDINARY_PIPE;
-                break;
+                cmd_list.count = 0;
             }
-        } else if (cmd_table.commands[index][0] == '!') {
-            cmd_list.count = atoi(&cmd_table.commands[index][1]);
-            cmd_list.op = NUMBER_PIPE_ERR;
             break;
-        } else if (cmd_table.commands[index][0] == '>') {
-            strcpy(cmd_list.filename, cmd_table.commands[index + 1]);
-            index++;
+        } else if (cmd_table[index][0] == '!') {
+            cmd_list.op = NUMBER_PIPE_ERR;
+            cmd_list.count = stoi(&cmd_table[index][1]);
+            break;
+        } else if (cmd_table[index][0] == '>') {
             cmd_list.op = FILE_REDIRECTION;
+            cmd_list.filename = cmd_table[++index];
             break;
         } else {
-            cmd_list.argv[cmd_list.length++] = cmd_table.commands[index];
+            cmd_list.argv.push_back(cmd_table[index++]);
         }
-        index++;
     }
-
-    cmd_list.argv[cmd_list.length] = NULL;
     index++;
+    
+    return cmd_list;
 }
 
-void GetPath(ParsedCmd cmd_list, char command_path[], EnvTable env) {
-    char myenv[MAX_COMMAND_LEN];
-    strcpy(myenv, env.value[0]);
-    char delim[] = ":";
-    char *pch = strtok(myenv, delim);
+void CountdownPipefd(vector<Pipefd> &pipefd_table) {
+    for (int i = 0; i < pipefd_table.size(); ++i) {
+        pipefd_table[i].count--;
+    }
+}
 
-    while (pch != NULL) {
-        strcpy(command_path, pch);
-        if (!access(strcat(strcat(command_path, "/"), cmd_list.argv[0]), X_OK)) {
-            return;
+
+int CreatePipefd(vector<Pipefd> &pipefd_table, int count, bool to_next) {
+    Pipefd new_pipe;
+    pipe(new_pipe.pipefd);
+    new_pipe.count = count;
+    new_pipe.to_next = to_next;
+    pipefd_table.push_back(new_pipe);
+
+    return pipefd_table.back().pipefd[1];
+}
+
+int GetInputfd(vector<Pipefd> &pipefd_table) {
+    for (int i = 0; i < pipefd_table.size(); ++i) {
+        // close the write end if find any numbered pipe would be input
+        if (pipefd_table[i].count == 0 && pipefd_table[i].to_next == false) {
+            close(pipefd_table[i].pipefd[1]);
+            pipefd_table[i].pipefd[1] = -1;
+
+            return pipefd_table[i].pipefd[0];
         }
-        pch = strtok(NULL, delim);
     }
 
-    strcpy(command_path, "");
+    return STDIN_FILENO;
 }
 
-void ExecCmd(ParsedCmd cmd_list, const char *command_path, pid_t pid_table[], int &pid_length, int stdIOfd[]) {
-    if (!strcmp(command_path, "setenv")) {
-        setenv(cmd_list.argv[1], cmd_list.argv[2], 1);
-    } else if (!strcmp(command_path, "printenv")) {
-        char *msg = getenv(cmd_list.argv[1]);
-        char output[3000];
-        sprintf(output, "%s\n", msg);
-        if (msg) {
-            write(stdIOfd[1], output, strlen(output));
+int GetOutputfd(vector<Pipefd> &pipefd_table, ParsedCommand cmd_list, int sockfd) {
+    switch (cmd_list.op) {
+        case NUMBER_PIPE:
+        case NUMBER_PIPE_ERR:
+            // concat this output to next numbered pipe
+            for (int i = 0; i < pipefd_table.size(); ++i) {
+                if (pipefd_table[i].count == cmd_list.count && pipefd_table[i].to_next == false) return pipefd_table[i].pipefd[1];
+            }
+            return CreatePipefd(pipefd_table, cmd_list.count, false);
+        case ORDINARY_PIPE:
+            return CreatePipefd(pipefd_table, cmd_list.count, true);
+        case FILE_REDIRECTION:
+            return open(cmd_list.filename.c_str(), O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+    }
+    
+    return sockfd;
+}
+
+int GetErrorfd(vector<Pipefd> &pipefd_table, ParsedCommand cmd_list, int sockfd) {
+    if (cmd_list.op == NUMBER_PIPE_ERR) {
+        // concat this output to next numbered pipe
+        for (int i = 0; i < pipefd_table.size(); ++i) {
+            if (pipefd_table[i].count == cmd_list.count && pipefd_table[i].to_next == false) return pipefd_table[i].pipefd[1];
         }
+        return CreatePipefd(pipefd_table, cmd_list.count, false);
+    }
+    
+    return sockfd;
+}
+
+string GetPath(ParsedCommand cmd_list, map<string, string> env) {
+    string cmd_path = "";
+    stringstream ss(env["PATH"].c_str());
+
+    while (getline(ss, cmd_path, ':')) {
+        cmd_path += "/" + cmd_list.argv[0];
+        if (!access(cmd_path.c_str(), X_OK)) return cmd_path;
+    }
+    cmd_path = "";
+    
+    return cmd_path;
+}
+
+void ExecCmd(ParsedCommand cmd_list, const string cmd_path, vector<pid_t>& pid_table, int fd[]) {
+    if (cmd_path == "setenv") {
+        setenv(cmd_list.argv[1].c_str(), cmd_list.argv[2].c_str(), 1);
+    } else if (cmd_path == "printenv") {
+        char *msg = getenv(cmd_list.argv[1].c_str());
+        if (msg) write(fd[1], msg, strlen(msg));
     } else {
         signal(SIGCHLD, ChildHandler);
-        pid_t pid;
-
-        pid = fork();
+        pid_t pid = fork();
         while (pid < 0) {
             int status;
             waitpid(-1, &status, 0);
             pid = fork();
         }
         if (pid == 0) {
-            dup2(stdIOfd[0], STDIN_FILENO);
-            dup2(stdIOfd[1], STDOUT_FILENO);
-            dup2(stdIOfd[2], STDERR_FILENO);
+            dup2(fd[0], STDIN_FILENO);
+            dup2(fd[1], STDOUT_FILENO);
+            dup2(fd[2], STDERR_FILENO);
 
-            if (stdIOfd[0] != STDIN_FILENO) {
-                close(stdIOfd[0]);
-            }
-            if (stdIOfd[1] != STDOUT_FILENO) {
-                close(stdIOfd[1]);
-            }
-            if (stdIOfd[2] != STDERR_FILENO) {
-                close(stdIOfd[2]);
-            }
+            if (fd[0] != STDIN_FILENO) close(fd[0]);
+            if (fd[1] != STDOUT_FILENO) close(fd[1]);
+            if (fd[2] != STDERR_FILENO) close(fd[2]);
 
-            if (!strcmp(command_path, "")) {
+            if (cmd_path == "") {
                 cerr << "Unknown command: [" << cmd_list.argv[0] << "]." << endl;
             } else {
-                while (execvp(command_path, cmd_list.argv) == -1) {
-                    cerr << "error exec" << endl;
-                };
+                char* tmp[cmd_list.argv.size() + 1];
+                for (int i = 0; i < cmd_list.argv.size(); ++i) tmp[i] = strdup(cmd_list.argv[i].c_str());
+                tmp[cmd_list.argv.size()] = NULL;
+                while (execvp(cmd_path.c_str(), tmp) < 0) cerr << "error exec" << endl;
+                for (int i = 0; tmp[i] != NULL; ++i) free(tmp[i]);
             }
 
             exit(0);
         } else {
-            pid_table[pid_length++] = pid;
+            pid_table.push_back(pid);
             if (cmd_list.op == NONE || cmd_list.op == FILE_REDIRECTION) {
-                pid_table[pid_length++] = pid;
-                for (int i = 0; i < pid_length; ++i) {
+                for (int i = 0; i < pid_table.size(); ++i) {
                     int status;
                     waitpid(pid_table[i], &status, 0);
                 }
                 if (cmd_list.op == FILE_REDIRECTION) {
-                    close(stdIOfd[1]);
+                    close(fd[1]);
                 }
             }
         }
     }
 }
 
-void CountdownPipefd(Pipefd pipefd_table[], const int pipefd_length) {
-    for (int i = 0; i < pipefd_length; ++i) {
-        pipefd_table[i].count -= 1;
-    }
-}
-
-void CreatePipefd(Pipefd pipefd_table[], int &pipefd_length, ParsedCmd cmd_list, bool to_next) {
-    pipe(pipefd_table[pipefd_length].IOfd);
-    pipefd_table[pipefd_length].count = cmd_list.count;
-    pipefd_table[pipefd_length].to_next = to_next;
-    pipefd_length++;
-}
-
-void GetStdIOfd(Pipefd pipefd_table[], int &pipefd_length, int sockfd, ParsedCmd cmd_list, int stdIOfd[]) {
-    bool find = false;
-    for (int i = 0; i < pipefd_length; ++i) {
-        // if pipe[i] is "|num" or "!num", and count=0, then close the write end.
-        if (pipefd_table[i].count == 0) {
-            close(pipefd_table[i].IOfd[1]);
-            pipefd_table[i].IOfd[1] = -1;
-
-            stdIOfd[0] =  pipefd_table[i].IOfd[0];
-            find = true;
-            break;
-        }
-    }
-    if (!find) stdIOfd[0] = STDIN_FILENO;
-
-    find = false;
-    if (cmd_list.op == NUMBER_PIPE || cmd_list.op == NUMBER_PIPE_ERR) {
-        for (int i = 0; i < pipefd_length; ++i) {
-            // use same count pipe which has used
-            if (pipefd_table[i].count == cmd_list.count) {
-                stdIOfd[1] = pipefd_table[i].IOfd[1];
-                find = true;
-                break;
-            }
-        }
-        if (!find){
-            CreatePipefd(pipefd_table, pipefd_length, cmd_list, false);
-            stdIOfd[1] = pipefd_table[pipefd_length - 1].IOfd[1];
-            find = true;
-        }
-    } else if (cmd_list.op == ORDINARY_PIPE) {
-        CreatePipefd(pipefd_table, pipefd_length, cmd_list, true);
-        stdIOfd[1] = pipefd_table[pipefd_length - 1].IOfd[1];
-        find = true;
-    } else if (cmd_list.op == FILE_REDIRECTION) {
-        stdIOfd[1] = open(cmd_list.filename, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
-        find = true;
-    }
-    if (!find) stdIOfd[1] = sockfd;
-
-    find = false;
-    if (cmd_list.op == NUMBER_PIPE_ERR) {
-        for (int i = 0; i < pipefd_length; ++i) {
-            if (pipefd_table[i].count == cmd_list.count) {
-                stdIOfd[2] = pipefd_table[i].IOfd[1];
-                find = true;
-                break;
-            }
-        }
-        if(!find){
-            CreatePipefd(pipefd_table, pipefd_length, cmd_list, false);
-            stdIOfd[2] = pipefd_table[pipefd_length - 1].IOfd[1];
-        }
-    }
-    if (!find) stdIOfd[2] = sockfd;
-}
-
-
-void ClosePipefd(Pipefd pipefd_table[], int &pipefd_length) {
-    for (int i = 0; i < pipefd_length; ++i) {
+void ClosePipefd(vector<Pipefd> &pipefd_table) {
+    for (int i = 0; i < pipefd_table.size(); ++i) {
         if (pipefd_table[i].count <= 0 && pipefd_table[i].to_next == false) {
-            close(pipefd_table[i].IOfd[0]);
-            
-            pipefd_length -= 1;
+            close(pipefd_table[i].pipefd[0]);
+            pipefd_table[i].pipefd[0] = -1;
 
-            Pipefd temp = pipefd_table[pipefd_length];
-            pipefd_table[pipefd_length] = pipefd_table[i];
-            pipefd_table[i] = temp;
-
-            i -= 1;
+            pipefd_table.erase(pipefd_table.begin() + i);
+            i--;
         } else if (pipefd_table[i].to_next == true) {
             pipefd_table[i].to_next = false;
         }
     }
 }
 
-void ClearPipefd(Pipefd pipefd_table[], int &pipefd_length) {
-    for (int i = 0; i < pipefd_length; ++i) {
-        close(pipefd_table[i].IOfd[0]);
-        close(pipefd_table[i].IOfd[1]);
+void ExecSocket(int sockfd, map<string, string> &env) {
+    vector<Pipefd> pipefd_table;
+
+    while (true) {
+        char read_buffer[MAX_LINE_LEN];
+        char input[MAX_LINE_LEN];
+
+        write(sockfd, "% ", strlen("% "));
+        memset(&input, '\0', sizeof(input));
+        do {
+            memset(&read_buffer, '\0', sizeof(read_buffer));
+            read(sockfd, read_buffer, sizeof(read_buffer));
+            strcat(input, read_buffer);
+        } while (read_buffer[strlen(read_buffer) - 1] != '\n');
+        strtok(input, "\r\n");
+
+        string buffer = input;
+        vector<string> cmd_table;
+        vector<pid_t> pid_table;
+        int index = 0;
+
+        SplitString(buffer, cmd_table);
+        if (cmd_table.size() == 0) continue;
+        if (cmd_table[0] == "exit") return;
+
+        CountdownPipefd(pipefd_table);
+
+        if (!IsBuildInCmd(cmd_table, env, sockfd)) {
+            while (index < cmd_table.size()) {
+                int fd[3];
+                ParsedCommand cmd_list = ParseCmd(cmd_table, index);
+
+                fd[0] = GetInputfd(pipefd_table);
+                fd[1] = GetOutputfd(pipefd_table, cmd_list, sockfd);
+                fd[2] = GetErrorfd(pipefd_table, cmd_list, sockfd);
+
+                string cmd_path = GetPath(cmd_list, env);
+                ExecCmd(cmd_list, cmd_path, pid_table, fd);
+                ClosePipefd(pipefd_table);
+            }
+        }
     }
-    pipefd_length = 0;
+}
+
+int main(int argc, char* argv[]) {
+    setenv("PATH", "bin:.", 1);
+    if (argc != 2) {
+        cerr << "./np_simple [port]" << endl;
+        exit(1);
+    }
+
+    int server_sockfd = TCPconnect(atoi(argv[1]));
+    sockaddr_in client_addr;
+
+    while (true) {
+        socklen_t addr_len = sizeof(client_addr);
+        int client_sockfd = accept(server_sockfd, (sockaddr *) &client_addr, &addr_len);
+        if (client_sockfd < 0) {
+            cerr << "Error: accept failed" << endl;
+            continue;
+        }
+
+        map<string, string> env;
+        env["PATH"] =  "bin:.";
+
+        ExecSocket(client_sockfd, env);
+        close(client_sockfd);
+    }
+    close(server_sockfd);
+    return 0;
 }

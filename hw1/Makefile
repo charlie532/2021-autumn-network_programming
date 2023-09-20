@@ -1,9 +1,9 @@
-CC = g++
+CXX = g++
 CFLAGS = -Wall -g 
-TARGET = ./
+TARGET = ./work_dir/
 
 all:
-	$(CC) $(CFLAGS) npshell.cpp -o $(TARGET)npshell
+	$(CXX) $(CFLAGS) npshell.cpp -o $(TARGET)npshell
      
 clean:
 	rm $(TARGET)npshell
