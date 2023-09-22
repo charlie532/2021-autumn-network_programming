@@ -564,7 +564,7 @@ int main(int argc, char* argv[]) {
     FD_SET(server_sockfd, &activefds);
 
     while (true) {
-        memcpy(&readfds, &activefds, sizeof(activefds));
+        memcpy(&readfds, &activefds, sizeof(readfds));
 
         if (select(fds_max_num, &readfds, NULL, NULL, NULL) < 0) {
             cerr << "Error: select error" << endl;

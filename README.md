@@ -1,9 +1,5 @@
 # 2021-autumn-network_programming
 
-
-## Operating System
-Ubuntu 20.04
-
 ## Projects
 |Project|Topic|
 |---|---|
