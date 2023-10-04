@@ -58,7 +58,7 @@ ClientInfo* GetCliSHM(int g_shmid_cli) {
     ClientInfo* shm = (ClientInfo*)shmat(g_shmid_cli, NULL, 0);
 	if (shm < (ClientInfo*)0) {
 		cerr << "Error: shmat() failed" << endl;
-		exit(1);
+		exit(-1);
 	}
     return shm;
 }
@@ -67,7 +67,7 @@ char* GetMsgSHM(int g_shmid_msg) {
     char* shm = (char*)shmat(g_shmid_msg, NULL, 0);
 	if (shm < (char*)0) {
 		cerr << "Error: shmat() failed" << endl;
-		exit(1);
+		exit(-1);
 	}
     return shm;
 }
@@ -76,7 +76,7 @@ FIFOInfo* GetFIFOSHM(int g_shmid_fifo) {
     FIFOInfo* shm = (FIFOInfo*)shmat(g_shmid_fifo, NULL, 0);
 	if (shm < (FIFOInfo*)0) {
 		cerr << "Error: shmat() failed" << endl;
-		exit(1);
+		exit(-1);
 	}
     return shm;
 }
@@ -154,7 +154,7 @@ void ServerSigHandler(int sig) {
         shmctl(g_shmid_cli, IPC_RMID, NULL);
         shmctl(g_shmid_msg, IPC_RMID, NULL);
         shmctl(g_shmid_fifo, IPC_RMID, NULL);
-		exit (0);
+		exit(0);
 	}
 	signal (sig, ServerSigHandler);
 }
@@ -237,7 +237,7 @@ void CreatePipe(vector<PipeFd> &pipe_vector, int pipe_num, int &in_fd) {
     int pipe_fd[2];
     if (pipe(pipe_fd) < 0) {
         cerr << "pipe error" << endl;
-        exit(0);
+        exit(-1);
     }
     PipeFd new_pipefd;
     new_pipefd.in_fd = pipe_fd[1];  // write fd
@@ -253,7 +253,7 @@ void CreateUserPipe(int cur_id, int target_id, int &out_fd) {
 
     if (mkfifo(fifopath, 0666 | S_IFIFO) < 0) {
         cerr << "mkfifo error" << endl;
-        exit(0);
+        exit(-1);
     }
     ClientInfo* shm_cli = GetCliSHM(g_shmid_cli);
     ClientInfo* target_cli = GetClientByID(target_id, shm_cli);
@@ -731,7 +731,7 @@ int TCPconnect(uint16_t port) {
     sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd < 0) {
         cerr << "Error: socket failed" << endl;
-        exit(1);
+        exit(-1);
     }
 
     bzero((char *) &serv_addr, sizeof(serv_addr));
@@ -741,15 +741,15 @@ int TCPconnect(uint16_t port) {
 
     if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval)) < 0) {
         cerr << "Error: setsockopt failed" << endl;
-        exit(1);
+        exit(-1);
     }
     if (bind(sockfd, (sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
         cerr << "Error: bind failed" << endl;
-        exit(1);
+        exit(-1);
     }
     if (listen(sockfd, 0) < 0) {
         cerr << "Error: listen failed" << endl;
-        exit(1);
+        exit(-1);
     }
 
     return sockfd;
@@ -759,17 +759,17 @@ void InitSHM() {
     g_shmid_cli = shmget(SHM_KEY, sizeof(ClientInfo) * MAX_USER, 0666 | IPC_CREAT);
 	if (g_shmid_cli < 0) {
 		cerr << "Error: init_shm() failed" << endl;
-		exit(1);
+		exit(-1);
 	}
     g_shmid_msg = shmget(SHM_MSG_KEY, sizeof(char) * MAX_MSG_LEN, 0666 | IPC_CREAT);
 	if (g_shmid_msg < 0) {
 		cerr << "Error: init_shm() failed" << endl;
-		exit(1);
+		exit(-1);
 	}
     g_shmid_fifo = shmget(SHM_FIFO_KEY, sizeof(FIFOInfo), 0666 | IPC_CREAT);
 	if (g_shmid_fifo < 0) {
 		cerr << "Error: init_shm() failed" <<endl;
-		exit(1);
+		exit(-1);
 	}
 
 	ClientInfo *shm = GetCliSHM(g_shmid_cli);
@@ -854,7 +854,7 @@ int main(int argc, char* argv[]) {
             int client_id = GetIDFromSHM();
             if (client_id < 0) {
                 cerr << "Error: get client id failed" << endl;
-                exit(1);
+                exit(-1);
             }
             AddClient(client_id, client_sockfd, client_addr);
             if (ClientExec(client_id) == -1) { // -1 represent exec
