@@ -54,30 +54,29 @@ queue<string> cmds;
 vector<pid_t> pid_vector;
 vector<PipeFd> pipe_vector;
 
+template <typename T>
+void checkShmatError(T* shm) {
+    if (shm < (T*)0) {
+        cerr << "Error: shmat() failed" << endl;
+        exit(-1);
+    }
+}
+
 ClientInfo* GetCliSHM(int g_shmid_cli) {
     ClientInfo* shm = (ClientInfo*)shmat(g_shmid_cli, NULL, 0);
-	if (shm < (ClientInfo*)0) {
-		cerr << "Error: shmat() failed" << endl;
-		exit(EXIT_FAILURE);
-	}
+    checkShmatError(shm);
     return shm;
 }
 
 char* GetMsgSHM(int g_shmid_msg) {
     char* shm = (char*)shmat(g_shmid_msg, NULL, 0);
-	if (shm < (char*)0) {
-		cerr << "Error: shmat() failed" << endl;
-		exit(EXIT_FAILURE);
-	}
+    checkShmatError(shm);
     return shm;
 }
 
 FIFOInfo* GetFIFOSHM(int g_shmid_fifo) {
     FIFOInfo* shm = (FIFOInfo*)shmat(g_shmid_fifo, NULL, 0);
-	if (shm < (FIFOInfo*)0) {
-		cerr << "Error: shmat() failed" << endl;
-		exit(EXIT_FAILURE);
-	}
+    checkShmatError(shm);
     return shm;
 }
 
@@ -217,7 +216,6 @@ void CreatePipe(vector<PipeFd> &pipe_vector, int pipe_num, int &in_fd) {
     // has same pipe => reuse old pipe (multiple write, one read)
     // no same pipe => create new pipe (one write, one read)
     bool has_same_pipe = false;
-
     for (auto it = pipe_vector.begin(); it != pipe_vector.end(); ++it) {
         if (it->count == pipe_num) {
             has_same_pipe = true;
@@ -393,7 +391,7 @@ int ExecCmd(vector<string> &arguments, int in_fd, int out_fd, int err_fd, bool l
             child_pid = fork();
         }
         if (child_pid == 0) { // child process
-            // current client open FIFO and record write fd
+            // current client open user pipe and record write fd
             if (target_id > 0) SetUserPipeOut(target_id, out_fd);
 
             // pipe ops
@@ -520,9 +518,7 @@ int ExecCmds() {
 
                 CreatePipe(pipe_vector, pipe_num, out_fd);
 
-                if (cmds.front().find('!') != string::npos) {
-                    err_fd = out_fd;
-                }
+                if (cmds.front().find('!') != string::npos) err_fd = out_fd;
 
                 cmds.pop();
                 is_first_argv = true;
@@ -742,18 +738,10 @@ int TCPconnect(uint16_t port) {
 
 void InitSHM() {
     g_shmid_cli = shmget(SHM_KEY, sizeof(ClientInfo) * MAX_USER, 0666 | IPC_CREAT);
-	if (g_shmid_cli < 0) {
-		cerr << "Error: init_shm() failed" << endl;
-		exit(EXIT_FAILURE);
-	}
     g_shmid_msg = shmget(SHM_MSG_KEY, sizeof(char) * MAX_MSG_LEN, 0666 | IPC_CREAT);
-	if (g_shmid_msg < 0) {
-		cerr << "Error: init_shm() failed" << endl;
-		exit(EXIT_FAILURE);
-	}
     g_shmid_fifo = shmget(SHM_FIFO_KEY, sizeof(FIFOInfo), 0666 | IPC_CREAT);
-	if (g_shmid_fifo < 0) {
-		cerr << "Error: init_shm() failed" <<endl;
+    if (g_shmid_cli < 0 || g_shmid_msg < 0 || g_shmid_fifo < 0) {
+		cerr << "Error: init_shm() failed" << endl;
 		exit(EXIT_FAILURE);
 	}
 
@@ -775,29 +763,30 @@ void InitSHM() {
 	shmdt(shm_fifo);
 }
 
-int GetIDFromSHM() {
-	ClientInfo *shm = GetCliSHM(g_shmid_cli);
+int AddClient(int sockfd, sockaddr_in address) {
+    ClientInfo *shm = GetCliSHM(g_shmid_cli);
+    int id_idx = -1;
 	for (int i = 0; i < MAX_USER; ++i) {
 		if (!shm[i].valid) {
             shm[i].valid = 1;
-			shmdt(shm);
-			return i + 1;
+			id_idx = i;
+            break;
 		}
 	}
-	shmdt(shm);
-    return -1;
-}
+    if (id_idx < 0) {
+        cerr << "Error: get client id failed" << endl;
+        exit(-1);
+    }
 
-void AddClient(int id, int sockfd, sockaddr_in address) {
-    int shm_idx = id - 1;
-    ClientInfo* shm = GetCliSHM(g_shmid_cli);
-	shm[shm_idx].valid = 1;
-    shm[shm_idx].id = id;
-	shm[shm_idx].pid = getpid();
-	shm[shm_idx].port = ntohs(address.sin_port);
-    strncpy(shm[shm_idx].user_ip, inet_ntoa(address.sin_addr), INET_ADDRSTRLEN);
-	strcpy(shm[shm_idx].user_name, "(no name)");
+	shm[id_idx].valid = 1;
+    shm[id_idx].id = id_idx + 1;
+	shm[id_idx].pid = getpid();
+	shm[id_idx].port = ntohs(address.sin_port);
+    strncpy(shm[id_idx].user_ip, inet_ntoa(address.sin_addr), INET_ADDRSTRLEN);
+	strcpy(shm[id_idx].user_name, "(no name)");
 	shmdt(shm);
+
+    return id_idx + 1;
 }
 
 int main(int argc, char* argv[]) {
@@ -836,13 +825,8 @@ int main(int argc, char* argv[]) {
             close(client_sockfd);
             close(server_sockfd);
 
-            int client_id = GetIDFromSHM();
-            if (client_id < 0) {
-                cerr << "Error: get client id failed" << endl;
-                exit(EXIT_FAILURE);
-            }
-            AddClient(client_id, client_sockfd, client_addr);
-            if (ClientExec(client_id) == -1) { // -1 represent exit
+            int client_id = AddClient(client_sockfd, client_addr);
+            if (ClientExec(client_id) == -1) { // -1: exit
                 Broadcast("logout", "", cur_id, -1);
 
                 // clean client info
