@@ -58,7 +58,7 @@ ClientInfo* GetCliSHM(int g_shmid_cli) {
     ClientInfo* shm = (ClientInfo*)shmat(g_shmid_cli, NULL, 0);
 	if (shm < (ClientInfo*)0) {
 		cerr << "Error: shmat() failed" << endl;
-		exit(-1);
+		exit(EXIT_FAILURE);
 	}
     return shm;
 }
@@ -67,7 +67,7 @@ char* GetMsgSHM(int g_shmid_msg) {
     char* shm = (char*)shmat(g_shmid_msg, NULL, 0);
 	if (shm < (char*)0) {
 		cerr << "Error: shmat() failed" << endl;
-		exit(-1);
+		exit(EXIT_FAILURE);
 	}
     return shm;
 }
@@ -76,7 +76,7 @@ FIFOInfo* GetFIFOSHM(int g_shmid_fifo) {
     FIFOInfo* shm = (FIFOInfo*)shmat(g_shmid_fifo, NULL, 0);
 	if (shm < (FIFOInfo*)0) {
 		cerr << "Error: shmat() failed" << endl;
-		exit(-1);
+		exit(EXIT_FAILURE);
 	}
     return shm;
 }
@@ -93,38 +93,33 @@ ClientInfo* GetClientByID(int id, ClientInfo* shm_cli) {
 }
 
 void Broadcast(string action, string msg, int cur_id, int target_id) {
-    string send_msg = "";
     ClientInfo* shm_cli;
     ClientInfo* target_cli = (target_id != -1 ? GetClientByID(target_id, shm_cli) : NULL);
     ClientInfo* cur_cli = GetClientByID(cur_id, shm_cli);
     if (cur_cli == NULL) {
-        cout << "cannot find client id: " << cur_id << endl;
+        fprintf(stderr, "cannot find client id: %d\n", cur_id);
         return;
     }
 
-    // broadcast to all
+    char send_msg[MAX_MSG_LEN];
     if (action == "login") {
-        send_msg = "*** User '(no name)' entered from " + string(cur_cli->user_ip) + ":" + to_string(cur_cli->port) + ". ***\n";
+        sprintf(send_msg, "*** User '(no name)' entered from %s:%d. ***\n", cur_cli->user_ip, cur_cli->port);
     } else if (action == "logout") {
-        send_msg = "*** User '" + string(cur_cli->user_name) + "' left. ***\n";
+        sprintf(send_msg, "*** User '%s' left. ***\n", cur_cli->user_name);
     } else if (action == "name") {
-        send_msg = "*** User from " + string(cur_cli->user_ip) + ":" + to_string(cur_cli->port);
-        send_msg += " is named '" + string(cur_cli->user_name) + "'. ***\n";
+        sprintf(send_msg, "*** User from %s:%d is named '%s'. ***\n", cur_cli->user_ip, cur_cli->port, cur_cli->user_name);
     } else if (action == "yell") {
-        send_msg = "*** " + string(cur_cli->user_name) + " yelled ***: " + msg + "\n";   
+        sprintf(send_msg, "*** %s yelled ***: %s\n", cur_cli->user_name, msg.c_str());
     } else if (action == "send") {
-        send_msg = "*** " + string(cur_cli->user_name) + " (#" + to_string(cur_cli->id) + ") just piped '";
-        send_msg += msg + "' to " + string(target_cli->user_name) + " (#" + to_string(target_cli->id) + ") ***\n";
+        sprintf(send_msg, "*** %s (#%d) just piped '%s' to %s (#%d) ***\n", cur_cli->user_name, cur_cli->id, msg.c_str(), target_cli->user_name, target_cli->id);
     } else if (action == "recv") {
-        send_msg = "*** " + string(cur_cli->user_name) + " (#" + to_string(cur_cli->id);
-        send_msg += ") just received from " + string(target_cli->user_name) + " (#";
-        send_msg += to_string(target_cli->id) + ") by '" + msg + "' ***\n";
+        sprintf(send_msg, "*** %s (#%d) just received from %s (#%d) by '%s' ***\n", cur_cli->user_name, cur_cli->id, target_cli->user_name, target_cli->id, msg.c_str());
     } else if (action == "tell") {
-        send_msg = "*** " + string(cur_cli->user_name) + " told you ***: " + msg + "\n";
+        sprintf(send_msg, "*** %s told you ***: %s\n", cur_cli->user_name, msg.c_str());
     }
 
     char* shm_msg = GetMsgSHM(g_shmid_msg);
-    sprintf(shm_msg, "%s", send_msg.c_str());
+    sprintf(shm_msg, "%s", send_msg);
     shmdt(shm_msg);
     usleep(500);
 
@@ -132,9 +127,7 @@ void Broadcast(string action, string msg, int cur_id, int target_id) {
     shm_cli = GetCliSHM(g_shmid_cli);
     if (action != "tell") {
         for (int i = 0; i < MAX_USER; ++i) {
-            if (shm_cli[i].valid == 1) {
-                kill(shm_cli[i].pid, SIGUSR1);
-            }
+            if (shm_cli[i].valid == 1) kill(shm_cli[i].pid, SIGUSR1);
         }
     } else {
         kill(shm_cli[target_id-1].pid, SIGUSR1);
@@ -154,9 +147,9 @@ void ServerSigHandler(int sig) {
         shmctl(g_shmid_cli, IPC_RMID, NULL);
         shmctl(g_shmid_msg, IPC_RMID, NULL);
         shmctl(g_shmid_fifo, IPC_RMID, NULL);
-		exit(0);
+		exit(EXIT_SUCCESS);
 	}
-	signal (sig, ServerSigHandler);
+	signal(sig, ServerSigHandler);
 }
 
 void ResetCliFIFOSHM() {
@@ -237,7 +230,7 @@ void CreatePipe(vector<PipeFd> &pipe_vector, int pipe_num, int &in_fd) {
     int pipe_fd[2];
     if (pipe(pipe_fd) < 0) {
         cerr << "pipe error" << endl;
-        exit(-1);
+        exit(EXIT_FAILURE);
     }
     PipeFd new_pipefd;
     new_pipefd.in_fd = pipe_fd[1];  // write fd
@@ -253,7 +246,7 @@ void CreateUserPipe(int cur_id, int target_id, int &out_fd) {
 
     if (mkfifo(fifopath, 0666 | S_IFIFO) < 0) {
         cerr << "mkfifo error" << endl;
-        exit(-1);
+        exit(EXIT_FAILURE);
     }
     ClientInfo* shm_cli = GetCliSHM(g_shmid_cli);
     ClientInfo* target_cli = GetClientByID(target_id, shm_cli);
@@ -326,7 +319,7 @@ void Tell(int target_id, string msg) {
     if(shm_cli[target_id-1].valid != 0) {
         Broadcast("tell", msg, cur_id, target_id);
     } else {
-        cerr << "*** Error: user #" << to_string(target_id) << " does not exist yet. ***" << endl;
+        fprintf(stderr, "*** Error: user #%d does not exist yet. ***\n", target_id);
     }
     shmdt(shm_cli);
 }
@@ -335,7 +328,7 @@ void Name(string name) {
     ClientInfo* shm_cli = GetCliSHM(g_shmid_cli);
     for (size_t i = 0; i < MAX_USER; ++i) {
         if (!strcmp(shm_cli[i].user_name, name.c_str())) {
-            cout << "*** User '" + name + "' already exists. ***" << endl;
+            fprintf(stderr, "*** User '%s' already exists. ***\n", name.c_str());
             return;
         }
     }
@@ -424,7 +417,7 @@ int ExecCmd(vector<string> &arguments, int in_fd, int out_fd, int err_fd, bool l
                 if(execvp(args[0], args) < 0) cerr << "execl error" << endl;
             }
 
-            exit(0);
+            exit(EXIT_SUCCESS);
         } else { // parent process
             if (line_ends && !is_using_pipe) {
                 int status;
@@ -559,78 +552,76 @@ int ExecCmds() {
                 is_first_argv = cmds.empty();
                 is_final_argv = cmds.empty();
                 line_ends = cmds.empty();
-            // named pipe (out), ex: >2
+            // user pipe (out), ex: >2
             } else if ((cmds.front().find('>') != string::npos) && (cmds.front() != ">")) {
-                string tmp = cmds.front().substr(1);
-                target_id = stoi(tmp);
+                target_id = stoi(cmds.front().substr(1));
                 ClientInfo* shm_cli;
 
-                if (GetClientByID(target_id, shm_cli) == NULL) { // target id not exist
+                if (GetClientByID(target_id, shm_cli) != NULL) { // target id exist
+                    FIFOInfo* shm_fifo = GetFIFOSHM(g_shmid_fifo);
+                    if (shm_fifo->fifo[cur_id-1][target_id-1].in_fd == -1) { // user pipe not exist yet
+                        CreateUserPipe(cur_id, target_id, out_fd);
+
+                        is_using_pipe = true;
+                        is_in_userpipe = true;
+                        cmds.pop();
+                        is_first_argv = cmds.empty();
+                        is_final_argv = cmds.empty();
+                        line_ends = cmds.empty();
+                        send_str_id = target_id;
+                    } else {
+                        fprintf(stderr, "*** Error: the pipe #%d->#%d already exists. ***\n", cur_id, target_id);
+                        
+                        queue<string> empty;
+                        swap(cmds, empty);
+                        shmdt(shm_fifo);
+                        return 0;
+                    }
+                    shmdt(shm_fifo);
+                } else {
                     cmds.pop();
-                    cout << "*** Error: user #" << target_id << " does not exist yet. ***" << endl;
+                    fprintf(stderr, "*** Error: user #%d does not exist yet. ***\n", target_id);
                     target_id = -1;
 
                     queue<string> empty;
                     swap(cmds, empty);
                     return 0;
-                } else { // target id exists
-                    // check if user pipe already exists
+                }
+            // user pipe (in), ex: <2
+            } else if ((cmds.front().find('<') != string::npos) && (cmds.front() != "<")) {
+                source_id = stoi(cmds.front().substr(1));
+                ClientInfo* shm_cli;
+
+                if (GetClientByID(source_id, shm_cli) != NULL) {
                     FIFOInfo* shm_fifo = GetFIFOSHM(g_shmid_fifo);
-                    if (shm_fifo->fifo[cur_id-1][target_id-1].in_fd != -1) {
-                        cout << "*** Error: the pipe #" << cur_id << "->#" << target_id << " already exists. ***" << endl;
+                    if (shm_fifo->fifo[source_id-1][cur_id-1].out_fd != -1) { // user pipe exist
+                        GetUserPipeFd(source_id, cur_id, in_fd);
+
+                        is_in_userpipe = true;
+                        cmds.pop();
+                        is_first_argv = cmds.empty();
+                        is_final_argv = cmds.empty();
+                        line_ends = cmds.empty();
+                        recv_str_id = source_id;
+                    } else {
+                        fprintf(stderr, "*** Error: the pipe #%d->#%d does not exist yet. ***\n", source_id, cur_id);
                         
                         queue<string> empty;
                         swap(cmds, empty);
+                        shmdt(shm_fifo);
                         return 0;
                     }
                     shmdt(shm_fifo);
-
-                    // mkFIFO and record FIFOname
-                    CreateUserPipe(cur_id, target_id, out_fd);
-                    is_using_pipe = true;
-                    is_in_userpipe = true;
+                } else {
                     cmds.pop();
-                    is_first_argv = cmds.empty();
-                    is_final_argv = cmds.empty();
-                    line_ends = cmds.empty();
-                    send_str_id = target_id;
-                }
-            // named pipe (in), ex: <2
-            } else if ((cmds.front().find('<') != string::npos) && (cmds.front() != "<")) {
-                string tmp = cmds.front().substr(1);
-                source_id = stoi(tmp);
-                ClientInfo* shm_cli;
-
-                if (GetClientByID(source_id, shm_cli) == NULL) { // target id does not exist
-                    cmds.pop();
-                    cout << "*** Error: user #" << source_id << " does not exist yet. ***" << endl;
+                    fprintf(stderr, "*** Error: user #%d does not exist yet. ***\n", target_id);
                     source_id = -1;
                     
                     queue<string> empty;
                     swap(cmds, empty);
                     return 0;
-                } else { // target id exists
-                    // check if user pipe not exists
-                    FIFOInfo* shm_fifo = GetFIFOSHM(g_shmid_fifo);
-                    if (shm_fifo->fifo[source_id-1][cur_id-1].out_fd == -1) {
-                        // cannot find any userpipe's target id is current client id
-                        cout << "*** Error: the pipe #" << source_id << "->#" << cur_id << " does not exist yet. ***" << endl;
-                        
-                        queue<string> empty;
-                        swap(cmds, empty);
-                        return 0;
-                    }
-                    shmdt(shm_fifo);
-
-                    GetUserPipeFd(source_id, cur_id, in_fd);
-                    is_in_userpipe = true;
-                    cmds.pop();
-                    is_first_argv = cmds.empty();
-                    is_final_argv = cmds.empty();
-                    line_ends = cmds.empty();
-                    recv_str_id = source_id;
                 }
-            } else {
+            } else { // other cmds
                 arguments.push_back(cmds.front());
                 cmds.pop();
                 is_using_pipe = false;
@@ -664,8 +655,7 @@ int ExecCmds() {
             CountdownPipefd();
             if (need_close_pipe) close(in_fd);
             if (target_id > 0) target_id = -1;
-            // if userpipe in , then erase
-            if (source_id > 0) {
+            if (source_id > 0) { // erase the user pipe read from
                 EraseUserPipe(source_id);
                 source_id = -1;
             }
@@ -689,9 +679,8 @@ int ClientExec(int id) {
     cur_id = id;  // current id
     clearenv();
     SetEnv("PATH", "bin:.");
-    // signal handler
-    signal(SIGUSR1, SigHandler);// receive messages from others
-	signal(SIGUSR2, SigHandler);// open fifos to read
+    signal(SIGUSR1, SigHandler); // receive messages from others
+	signal(SIGUSR2, SigHandler); // open user pipe to read
 	signal(SIGINT, SigHandler);
 	signal(SIGQUIT, SigHandler);
 	signal(SIGTERM, SigHandler);
@@ -708,9 +697,7 @@ int ClientExec(int id) {
             cout << endl;
             return 1;
         }
-        if(terminal_input.empty()) {
-            continue;
-        }
+        if(terminal_input.empty()) continue;
 
         stringstream ss(terminal_input);
         string tmp = "";
@@ -718,9 +705,7 @@ int ClientExec(int id) {
             cmds.push(tmp);
         }
 
-        if (ExecCmds() == -1) {
-            return -1;
-        }
+        if (ExecCmds() == -1) return -1;
     }
 }
 
@@ -731,7 +716,7 @@ int TCPconnect(uint16_t port) {
     sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd < 0) {
         cerr << "Error: socket failed" << endl;
-        exit(-1);
+        exit(EXIT_FAILURE);
     }
 
     bzero((char *) &serv_addr, sizeof(serv_addr));
@@ -741,15 +726,15 @@ int TCPconnect(uint16_t port) {
 
     if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval)) < 0) {
         cerr << "Error: setsockopt failed" << endl;
-        exit(-1);
+        exit(EXIT_FAILURE);
     }
     if (bind(sockfd, (sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
         cerr << "Error: bind failed" << endl;
-        exit(-1);
+        exit(EXIT_FAILURE);
     }
     if (listen(sockfd, 0) < 0) {
         cerr << "Error: listen failed" << endl;
-        exit(-1);
+        exit(EXIT_FAILURE);
     }
 
     return sockfd;
@@ -759,17 +744,17 @@ void InitSHM() {
     g_shmid_cli = shmget(SHM_KEY, sizeof(ClientInfo) * MAX_USER, 0666 | IPC_CREAT);
 	if (g_shmid_cli < 0) {
 		cerr << "Error: init_shm() failed" << endl;
-		exit(-1);
+		exit(EXIT_FAILURE);
 	}
     g_shmid_msg = shmget(SHM_MSG_KEY, sizeof(char) * MAX_MSG_LEN, 0666 | IPC_CREAT);
 	if (g_shmid_msg < 0) {
 		cerr << "Error: init_shm() failed" << endl;
-		exit(-1);
+		exit(EXIT_FAILURE);
 	}
     g_shmid_fifo = shmget(SHM_FIFO_KEY, sizeof(FIFOInfo), 0666 | IPC_CREAT);
 	if (g_shmid_fifo < 0) {
 		cerr << "Error: init_shm() failed" <<endl;
-		exit(-1);
+		exit(EXIT_FAILURE);
 	}
 
 	ClientInfo *shm = GetCliSHM(g_shmid_cli);
@@ -819,7 +804,7 @@ int main(int argc, char* argv[]) {
     setenv("PATH", "bin:.", 1);
     if (argc != 2) {
         cerr << "./np_multi_proc [port]" << endl;
-        exit(1);
+        exit(EXIT_FAILURE);
     }
 
     int server_sockfd = TCPconnect(atoi(argv[1]));
@@ -854,10 +839,10 @@ int main(int argc, char* argv[]) {
             int client_id = GetIDFromSHM();
             if (client_id < 0) {
                 cerr << "Error: get client id failed" << endl;
-                exit(-1);
+                exit(EXIT_FAILURE);
             }
             AddClient(client_id, client_sockfd, client_addr);
-            if (ClientExec(client_id) == -1) { // -1 represent exec
+            if (ClientExec(client_id) == -1) { // -1 represent exit
                 Broadcast("logout", "", cur_id, -1);
 
                 // clean client info
@@ -871,7 +856,7 @@ int main(int argc, char* argv[]) {
                 close(STDIN_FILENO);
                 close(STDOUT_FILENO);
                 close(STDERR_FILENO);
-                exit(0);
+                exit(EXIT_SUCCESS);
             }
         } else {
             close(client_sockfd);

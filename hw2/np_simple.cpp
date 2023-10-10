@@ -45,7 +45,7 @@ int TCPconnect(uint16_t port) {
     sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd < 0) {
         cerr << "Error: socket failed" << endl;
-        exit(-1);
+        exit(EXIT_FAILURE);
     }
 
     bzero((char *) &serv_addr, sizeof(serv_addr));
@@ -55,15 +55,15 @@ int TCPconnect(uint16_t port) {
 
     if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval)) < 0) {
         cerr << "Error: setsockopt failed" << endl;
-        exit(-1);
+        exit(EXIT_FAILURE);
     }
     if (bind(sockfd, (sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
         cerr << "Error: bind failed" << endl;
-        exit(-1);
+        exit(EXIT_FAILURE);
     }
     if (listen(sockfd, 0) < 0) {
         cerr << "Error: listen failed" << endl;
-        exit(-1);
+        exit(EXIT_FAILURE);
     }
 
     return sockfd;
@@ -238,7 +238,7 @@ void ExecCmd(ParsedCommand cmd_list, const string cmd_path, vector<pid_t>& pid_t
                 for (int i = 0; tmp[i] != NULL; ++i) free(tmp[i]);
             }
 
-            exit(0);
+            exit(EXIT_SUCCESS);
         } else {
             pid_table.push_back(pid);
             if (cmd_list.op == NONE || cmd_list.op == FILE_REDIRECTION) {
